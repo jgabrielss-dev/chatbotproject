@@ -17,8 +17,21 @@ _client: genai.Client | None = None
 def _get_client() -> genai.Client:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=settings.gemini_api_key)
+        _client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(timeout=45000),
+        )
     return _client
+
+
+def _modelos() -> list[str]:
+    """Modelo principal + fallbacks (evita 503 de sobrecarga/descontinuacao)."""
+    lista: list[str] = []
+    for m in [settings.gemini_model, *settings.gemini_fallbacks.split(",")]:
+        m = (m or "").strip()
+        if m and m not in lista:
+            lista.append(m)
+    return lista
 
 _PROMPT_MEMORIA = """Você é um sistema de memória de um assistente. Mantenha o perfil do usuário
 num JSON. Regras:
@@ -56,13 +69,23 @@ def _contexto_prompt(system_prompt: str, memoria: dict) -> str:
 def _gerar(conteudo: str | list[types.Content], instrucao: str | None = None) -> str:
     if not settings.has_gemini:
         raise ValueError("Configure GEMINI_API_KEY no .env para usar a IA.")
-    config = types.GenerateContentConfig(system_instruction=instrucao or None)
-    resposta = _get_client().models.generate_content(
-        model=settings.gemini_model,
-        contents=conteudo,
-        config=config,
+    config = types.GenerateContentConfig(
+        system_instruction=instrucao or None,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
-    return resposta.text.strip()
+    erro: Exception | None = None
+    for modelo in _modelos():
+        try:
+            resposta = _get_client().models.generate_content(
+                model=modelo,
+                contents=conteudo,
+                config=config,
+            )
+            return resposta.text.strip()
+        except Exception as e:  # tenta o proximo modelo
+            log.warning("Modelo %s indisponivel: %s", modelo, str(e)[:120])
+            erro = e
+    raise erro if erro else RuntimeError("Nenhum modelo Gemini disponivel.")
 
 
 def responder(
