@@ -1,0 +1,18 @@
+name: Wakeup Render
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acordar app (Render free hiberna sem trafego)
+        run: curl -sf -o /dev/null -m 30 "https://chatbotproject-1-l9zr.onrender.com/health" || true
+      - name: Acordar Evolution API
+        run: curl -sf -o /dev/null -m 30 "https://evolution-api-4u66.onrender.com/" || true

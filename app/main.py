@@ -136,6 +136,11 @@ async def index():
     return FileResponse(INDEX_HTML)
 
 
+@app.get("/health", include_in_schema=False)
+async def health():
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------
 # Webhooks públicos (entrada de mensagens dos canais)
 # --------------------------------------------------------------------------
