@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import repositories as repo
@@ -18,7 +19,8 @@ from app.pipeline import processar_mensagem
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
 
-STATIC_DIR = Path(__file__).parent / "web" / "admin"
+RAIZ = Path(__file__).resolve().parent.parent
+INDEX_HTML = RAIZ / "index.html"
 MAX_CANAIS_POR_AGENTE = 5
 
 _poller_task: asyncio.Task | None = None
@@ -90,10 +92,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Chatbot Project SaaS", lifespan=lifespan)
 
+# A pagina tambem pode ser hospedada no GitHub Pages, entao liberamos CORS
+# para que o navegador consiga chamar esta API de outra origem.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(INDEX_HTML)
 
 
 # --------------------------------------------------------------------------

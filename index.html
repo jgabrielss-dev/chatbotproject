@@ -167,8 +167,14 @@ function toast(msg, tipo = "info") {
   setTimeout(() => el.remove(), 4200);
 }
 
+// Quando a pagina e servida pelo FastAPI a API esta na mesma origem ("").
+// No GitHub Pages ela e estatica, entao apontamos para o backend no Render.
+const API_BASE = /\.github\.io$/i.test(location.hostname)
+  ? "https://chatbotproject-1-l9zr.onrender.com"
+  : "";
+
 const api = async (url, opts = {}) => {
-  const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
+  const r = await fetch(API_BASE + url, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!r.ok) {
     let msg = r.statusText;
     try { const j = await r.json(); msg = j.detail || JSON.stringify(j); } catch (e) { try { msg = await r.text(); } catch (e2) {} }

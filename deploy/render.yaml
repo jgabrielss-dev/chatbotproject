@@ -2,7 +2,7 @@ services:
   - type: web
     name: chatbotproject
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r deploy/requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GEMINI_API_KEY
