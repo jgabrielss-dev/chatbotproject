@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+asyncpg
+python-dotenv
+httpx
+google-genai
+instagrapi

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chatbot Project - Gestão de Agentes</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --border: #262b3a; --text: #e6e8ee;
+    --muted: #9aa3b5; --accent: #4f7cff; --accent-2: #38b26e;
+    --danger: #ef5350; --warn: #f0a53b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text);
+    display: flex; min-height: 100vh;
+  }
+  aside {
+    width: 280px; padding: 16px; border-right: 1px solid var(--border); background: var(--panel);
+    overflow-y: auto;
+  }
+  aside h1 { font-size: 16px; margin: 0 0 14px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+    background: #20242f; color: var(--text); padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    font-size: 13px;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); }
+  .btn.green { background: var(--accent-2); border-color: var(--accent-2); }
+  .btn.danger { color: var(--danger); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .agente-item {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  }
+  .agente-item.active { border-color: var(--accent); }
+  .agente-item .nome { font-weight: 600; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #22283a; color: var(--muted);
+  }
+  .badge.on { background: rgba(56,178,110,.15); color: var(--accent-2); }
+  main { flex: 1; padding: 20px; max-width: 960px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=password], select, textarea {
+    width: 100%; background: #12141c; border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 9px 10px; font-size: 13px; font-family: inherit;
+  }
+  textarea { min-height: 140px; resize: vertical; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .qrcode { text-align: center; padding: 12px; }
+  .qrcode img { width: 220px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .warn {
+    background: rgba(240,165,59,.08); border: 1px solid var(--warn); color: var(--warn);
+    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px;
+  }
+  .kanal { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: #14161f; }
+  .kanal .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  pre { background: #12141c; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; }
+  .hidden { display: none; }
+  .aviso { font-size: 12px; color: var(--muted); }
+  .qr-status { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Chatbot Project</h1>
+  <div class="row" style="justify-content:space-between">
+    <button class="btn primary" id="btnNovo">+ Novo agente</button>
+  </div>
+  <div id="listaAgentes" style="margin-top:14px"></div>
+  <p class="aviso">Sem cobrança nesta fase. Todos os agentes usam a mesma chave Gemini do <code>.env</code>.</p>
+</aside>
+
+<main>
+  <div id="agenteForm" class="card hidden">
+    <h2 id="formTitle">Novo agente</h2>
+    <label>Nome</label>
+    <input type="text" id="nome" placeholder="Ex.: NutriTreino">
+    <label>System prompt (regras e personalidade da IA)</label>
+    <textarea id="prompt" placeholder="Você é um assistente..."></textarea>
+    <label class="row"><input type="checkbox" id="ativo" checked> Agente ativo</label>
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="btnSalvar">Salvar</button>
+      <button class="btn" id="btnCancelar">Cancelar</button>
+    </div>
+  </div>
+
+  <div id="detalhe" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0" id="detalheNome">—</h2>
+        <div class="row">
+          <button class="btn" id="btnEditar">Editar</button>
+          <button class="btn danger" id="btnExcluirAgente">Excluir agente</button>
+        </div>
+      </div>
+      <div id="promptPreview" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
+      <span class="badge" id="badgeAtivo">—</span>
+    </div>
+
+    <div class="card">
+      <h2>Canais (locais onde o agente responde)</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="novoCanalTipo" style="width:160px">
+          <option value="telegram">Telegram</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="instagram">Instagram</option>
+          <option value="webhook">Webhook genérico</option>
+        </select>
+        <button class="btn primary" id="btnNovoCanal">+ Novo canal</button>
+      </div>
+      <div id="canais"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let agentes = [], agenteAtual = null, editandoAgente = null;
+
+const api = async (url, opts = {}) => {
+  const r = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(t || r.statusText);
+  }
+  return r.status === 204 ? null : r.json();
+};
+
+async function carregarAgentes() {
+  agentes = await api("/api/agentes");
+  renderAgentes();
+}
+
+function renderAgentes() {
+  const el = $("listaAgentes");
+  el.innerHTML = "";
+  for (const a of agentes) {
+    const d = document.createElement("div");
+    d.className = "agente-item" + (agenteAtual && agenteAtual.id === a.id ? " active" : "");
+    d.innerHTML = `<span class="nome">${esc(a.nome)}</span>
+      <span class="badge ${a.ativo ? "on" : ""}">${a.ativo ? "ativo" : "pausado"}</span>`;
+    d.onclick = () => abrirAgente(a.id);
+    el.appendChild(d);
+  }
+}
+
+function esc(s) { return String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
+
+async function abrirAgente(id) {
+  agenteAtual = agentes.find((a) => a.id === id) || null;
+  renderAgentes();
+  $("agenteForm").classList.add("hidden");
+  $("detalhe").classList.remove("hidden");
+  $("detalheNome").textContent = agenteAtual.nome;
+  $("badgeAtivo").textContent = agenteAtual.ativo ? "ativo" : "pausado";
+  $("badgeAtivo").className = "badge" + (agenteAtual.ativo ? " on" : "");
+  $("promptPreview").textContent = agenteAtual.system_prompt || "(sem prompt)";
+  carregarCanais(id);
+}
+
+async function carregarCanais(agenteId) {
+  const canais = await api(`/api/agentes/${agenteId}/canais`);
+  const el = $("canais");
+  el.innerHTML = "";
+  if (!canais.length) {
+    el.innerHTML = `<p class="aviso">Nenhum canal ainda. Crie um para o agente começar a responder.</p>`;
+    return;
+  }
+  for (const c of canais) el.appendChild(renderCanal(c));
+}
+
+function renderCanal(c) {
+  const div = document.createElement("div");
+  div.className = "kanal";
+  const tipo = c.tipo.charAt(0).toUpperCase() + c.tipo.slice(1);
+  div.innerHTML = `
+    <div class="head">
+      <strong>${esc(c.nome)} <span class="badge">${tipo}</span>
+        <span class="badge ${c.ativo ? "on" : ""}">${c.ativo ? "ativo" : "pausado"}</span></strong>
+      <div class="row">
+        <button class="btn" data-acao="testar">Testar</button>
+        <button class="btn" data-acao="editar">Editar</button>
+        <button class="btn danger" data-acao="excluir">Excluir</button>
+      </div>
+    </div>
+    <div class="kanal-body"></div>
+  `;
+  div.querySelector('[data-acao="testar"]').onclick = () => testar(c.id, c.tipo);
+  div.querySelector('[data-acao="excluir"]').onclick = async () => {
+    if (!confirm("Excluir canal?")) return;
+    await api(`/api/canais/${c.id}`, { method: "DELETE" });
+    carregarCanais(agenteAtual.id);
+  };
+  div.querySelector('[data-acao="editar"]').onclick = async () => {
+    const form = await renderFormCanal(c);
+    const body = div.querySelector(".kanal-body");
+    body.replaceChildren(form);
+  };
+  renderCanalBody(div, c);
+  return div;
+}
+
+async function webhookUrl(c) {
+  try { return (await api(`/api/canais/${c.id}/webhook-url`)).url; } catch (e) { return ""; }
+}
+
+async function renderCanalBody(div, c) {
+  const body = div.querySelector(".kanal-body");
+  const tipo = c.tipo;
+  if (tipo === "telegram") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">Bot token: <code>${esc(c.config.token || "não definido")}</code></p>
+      <label>Webhook a registrar no bot</label>
+      <input type="text" readonly value="${esc(url)}">
+      <div class="row" style="margin-top:8px">
+        <button class="btn green" id="tgSet">Registrar webhook (setWebhook)</button>
+      </div>`;
+    body.querySelector("#tgSet").onclick = async (btn) => {
+      btn.disabled = true;
+      try { const r = await api(`/api/canais/${c.id}/telegram/set-webhook`, { method: "POST" }); alert("Webhook configurado p/ @" + r.bot + "!"); }
+      catch (e) { alert("Erro: " + e.message); }
+      btn.disabled = false;
+    };
+  } else if (tipo === "whatsapp") {
+    const url = await webhookUrl(c);
+    const estado = c.config.status || "conectando";
+    body.innerHTML = `
+      <p class="muted">Instância Evolution: <code>${esc(c.config.instance_name || "")}</code></p>
+      <div class="row">
+        <button class="btn primary" id="waConectar">Conectar (gerar QR)</button>
+        <button class="btn danger" id="waDesc">Desconectar</button>
+      </div>
+      <div class="qrcode">
+        <div id="waQR"></div>
+        <span class="qr-status" id="waStatus">Status: ${esc(estado)}</span>
+      </div>`;
+    let timer = null;
+    const mostrarQR = async () => {
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/qr`);
+        const qrEl = body.querySelector("#waQR");
+        const stEl = body.querySelector("#waStatus");
+        stEl.textContent = "Status: " + r.status;
+        if (r.qr) {
+          qrEl.innerHTML = `<img src="data:image/png;base64,${r.qr}" alt="QR">`;
+          clearInterval(timer); timer = setInterval(mostrarQR, 3000);
+        } else if (r.status === "open") {
+          qrEl.innerHTML = `<p class="badge on">Conectado!</p>`;
+          clearInterval(timer);
+        } else qrEl.innerHTML = "";
+      } catch (e) { /* ainda sem instância */ }
+    };
+    body.querySelector("#waConectar").onclick = async (btn) => {
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/conectar`, { method: "POST" });
+        if (r.status === "open") { clearInterval(timer); body.querySelector("#waStatus").textContent = "Status: open"; }
+        else { mostrarQR(); timer = timer || setInterval(mostrarQR, 5000); }
+      } catch (e) { alert("Erro: " + e.message); }
+      btn.disabled = false;
+    };
+    body.querySelector("#waDesc").onclick = async () => {
+      await api(`/api/canais/${c.id}/whatsapp/desconectar`, { method: "POST" });
+      clearInterval(timer);
+      body.querySelector("#waQR").innerHTML = "";
+      body.querySelector("#waStatus").textContent = "Status: desconectado";
+    };
+    mostrarQR();
+  } else if (tipo === "instagram") {
+    body.innerHTML = `
+      <div class="warn"><strong>Aviso:</strong> este canal usa método NÃO-oficial (instagrapi) e viola os termos da Meta — pode quebrar a qualquer momento ou bloquear a conta. Para uso estável, o cliente deve obter a API oficial da Meta (Instagram Messaging API) e usar o adapter oficial, evitando custos para você.</div>
+      <p class="muted" style="margin-top:8px">Usuário: <code>${esc(c.config.usuario || "não definido")}</code> — as DMs são lidas por polling automático.</p>`;
+  } else if (tipo === "webhook") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">URL a ser usada pelo cliente (POST JSON <code>{ "text": ..., "user": ... }</code> → responde com <code>{ "reply": ... }</code>):</p>
+      <input type="text" readonly value="${esc(url)}">
+      <pre>curl -X POST "${esc(url)}" -H "Content-Type: application/json" -d '{"text":"oi","user":"cliente1"}'</pre>`;
+  }
+}
+
+async function testar(canalId, tipo) {
+  try {
+    const r = await api(`/api/canais/${canalId}/testar`, { method: "POST" });
+    alert("OK: " + (r.info || "conectado"));
+  } catch (e) {
+    alert("Falha: " + e.message);
+  }
+}
+
+function renderFormCanal(c) {
+  const tipo = c.tipo;
+  const config = c.config || {};
+  const div = document.createElement("div");
+  div.innerHTML = `
+    <label>Nome do canal</label>
+    <input type="text" id="cNome" value="${esc(c.nome)}">
+    <label>Ativo</label>
+    <select id="cAtivo"><option value="true">Sim</option><option value="false">Não</option></select>
+    ${renderCampos(tipo, config)}
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="cSalvar">Salvar canal</button>
+      <button class="btn" id="cCancelar">Cancelar</button>
+    </div>`;
+  div.querySelector("#cAtivo").value = String(c.ativo);
+  div.querySelector("#cCancelar").onclick = () => renderCanalBody(div, c);
+  div.querySelector("#cSalvar").onclick = async (btn) => {
+    btn.disabled = true;
+    const config2 = {};
+    div.querySelectorAll("[data-config]").forEach((i) => {
+      config2[i.dataset.config] = i.type === "password" ? i.value.trim() : i.value.trim();
+    });
+    try {
+      await api(`/api/canais/${c.id}`, { method: "PUT", body: JSON.stringify({
+        nome: div.querySelector("#cNome").value.trim(),
+        ativo: div.querySelector("#cAtivo").value === "true",
+        config: config2,
+      })});
+      await carregarCanais(agenteAtual.id);
+    } catch (e) { alert("Erro: " + e.message); }
+    btn.disabled = false;
+  };
+  return div;
+}
+
+function renderCampos(tipo, config = {}) {
+  if (tipo === "telegram") return `<label>Token do bot</label><input type="password" data-config="token" value="${esc(config.token || "")}">`;
+  if (tipo === "whatsapp") return `
+    <label>URL do servidor Evolution (sua instância)</label>
+    <input type="text" data-config="server_url" placeholder="https://sua-evolution-api.com" value="${esc(config.server_url || "")}">
+    <label>API key global da Evolution</label>
+    <input type="password" data-config="apikey" value="${esc(config.apikey || "")}">`;
+  if (tipo === "instagram") return `
+    <label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${esc(config.usuario || "")}">
+    <label>Senha</label><input type="password" data-config="senha" value="${esc(config.senha || "")}">`;
+  return "";
+}
+
+$("btnNovo").onclick = () => {
+  agenteAtual = null; editandoAgente = null;
+  $("nome").value = ""; $("prompt").value = ""; $("ativo").checked = true;
+  $("formTitle").textContent = "Novo agente";
+  $("agenteForm").classList.remove("hidden");
+  $("detalhe").classList.add("hidden");
+};
+
+$("btnCancelar").onclick = () => { $("agenteForm").classList.add("hidden"); renderAgentes(); };
+
+$("btnSalvar").onclick = async () => {
+  const nome = $("nome").value.trim(), prompt = $("prompt").value.trim();
+  if (!nome || !prompt) { alert("Preencha nome e system prompt."); return; }
+  const body = JSON.stringify({ nome, system_prompt: prompt, ativo: $("ativo").checked });
+  try {
+    if (editandoAgente) await api(`/api/agentes/${editandoAgente}`, { method: "PUT", body });
+    else await api("/api/agentes", { method: "POST", body });
+    $("agenteForm").classList.add("hidden");
+    await carregarAgentes();
+  } catch (e) { alert("Erro: " + e.message); }
+};
+
+$("btnEditar").onclick = () => {
+  editandoAgente = agenteAtual.id;
+  $("nome").value = agenteAtual.nome;
+  $("prompt").value = agenteAtual.system_prompt;
+  $("ativo").checked = agenteAtual.ativo;
+  $("formTitle").textContent = "Editar agente";
+  $("agenteForm").classList.remove("hidden");
+};
+
+$("btnExcluirAgente").onclick = async () => {
+  if (!confirm("Excluir agente e todos os canais?")) return;
+  await api(`/api/agentes/${agenteAtual.id}`, { method: "DELETE" });
+  agenteAtual = null;
+  $("detalhe").classList.add("hidden");
+  await carregarAgentes();
+};
+
+$("btnNovoCanal").onclick = async () => {
+  const tipo = $("novoCanalTipo").value;
+  const nome = prompt("Nome do canal (ex.: WhatsApp do cliente A):");
+  if (!nome) return;
+  const config = {};
+  if (tipo === "telegram") config.token = prompt("Token do bot do Telegram:");
+  if (tipo === "whatsapp") {
+    config.server_url = prompt("URL do seu servidor Evolution API (ex.: https://evolution-api.com):");
+    config.apikey = prompt("API key global da Evolution:");
+  }
+  if (tipo === "instagram") {
+    config.usuario = prompt("Usuário do Instagram:");
+    config.senha = prompt("Senha do Instagram:");
+  }
+  try {
+    await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
+    await carregarCanais(agenteAtual.id);
+  } catch (e) { alert("Erro: " + e.message); }
+};
+
+carregarAgentes();
+</script>
+</body>
+</html>
