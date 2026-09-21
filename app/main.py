@@ -167,6 +167,10 @@ def _qr_strip(v: str | None) -> str:
     return (v or "").replace("data:image/png;base64,", "")
 
 
+def _norm_evento(v: str | None) -> str:
+    return (v or "").upper().replace(".", "_")
+
+
 @app.post("/webhook/evolution/{canal_id}")
 async def webhook_evolution(canal_id: int, request: Request):
     payload = await request.json()
@@ -175,10 +179,12 @@ async def webhook_evolution(canal_id: int, request: Request):
         return JSONResponse({"ok": False}, status_code=404)
 
     cfg = canal["config"]
-    evento = payload.get("event")
+    evento = _norm_evento(payload.get("event"))
 
     if evento == "QRCODE_UPDATED":
-        qr = _qr_strip(payload.get("data", {}).get("base64") or payload.get("data", {}).get("code"))
+        dados = payload.get("data", {})
+        qr_dados = dados.get("qrcode") or dados
+        qr = _qr_strip(qr_dados.get("base64") or qr_dados.get("code"))
         if qr:
             await repo.patch_canal_config(canal_id, "qr", qr)
         await repo.patch_canal_config(canal_id, "status", "scanning")

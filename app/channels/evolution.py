@@ -68,7 +68,7 @@ async def enviar_mensagem(
 
 def extrair_mensagem(payload: dict) -> tuple[str | str | None, str | None, dict | None]:
     """Retorna (texto, remoteJid, dados) de um evento MESSAGES_UPSERT."""
-    evento = payload.get("event")
+    evento = (payload.get("event") or "").upper().replace(".", "_")
     if evento != "MESSAGES_UPSERT":
         return None, None, None
     data = payload.get("data") or {}
