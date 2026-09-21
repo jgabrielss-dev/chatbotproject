@@ -17,6 +17,7 @@ async def criar_instancia(
             "url": webhook_url,
             "byEvents": False,
             "base64": False,
+            "events": ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE"],
         },
     }
     async with httpx.AsyncClient(timeout=30) as client:

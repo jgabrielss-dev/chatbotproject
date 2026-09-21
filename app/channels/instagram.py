@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 
@@ -26,7 +27,13 @@ def _arquivo_sessao(username: str) -> Path:
     return DATA_DIR / f"ig_{username}.json"
 
 
-def _login_sync(username: str, password: str) -> Client:
+def _chave(username: str, password: str, sessionid: str) -> str:
+    """Chave de cache/lock que muda quando as credenciais mudam."""
+    marca = hashlib.sha1(f"{password}|{sessionid}".encode()).hexdigest()[:8]
+    return f"{username}:{marca}"
+
+
+def _login_sync(username: str, password: str, sessionid: str) -> Client:
     client = Client()
     client.delay_range = [1, 3]
     arquivo = _arquivo_sessao(username)
@@ -36,7 +43,12 @@ def _login_sync(username: str, password: str) -> Client:
         except Exception as e:
             log.warning("Sessão Instagram inválida, relogando: %s", e)
     try:
-        client.login(username, password)
+        if sessionid:
+            # Alternativa quando o login por senha é bloqueado (nta_upsell):
+            # reutiliza o cookie "sessionid" de um navegador já logado.
+            client.login_by_sessionid(sessionid)
+        else:
+            client.login(username, password)
     except Exception as e:
         log.error("Falha ao autenticar Instagram de %s: %s", username, e)
         raise
@@ -44,32 +56,34 @@ def _login_sync(username: str, password: str) -> Client:
     return client
 
 
-async def _com_lock(username: str, func, *args):
-    lock = _locks.setdefault(username, asyncio.Lock())
+async def _com_lock(chave: str, func, *args):
+    lock = _locks.setdefault(chave, asyncio.Lock())
     async with lock:
         return await asyncio.to_thread(func, *args)
 
 
-def _cliente_sync(username: str, password: str) -> Client:
+def _cliente_sync(username: str, password: str, sessionid: str) -> Client:
     """Cliente logado SEM adquirir lock (uso interno dentro de _com_lock)."""
-    if username in _clientes:
-        return _clientes[username]
-    _clientes[username] = _login_sync(username, password)
-    return _clientes[username]
+    chave = _chave(username, password, sessionid)
+    if chave in _clientes:
+        return _clientes[chave]
+    _clientes[chave] = _login_sync(username, password, sessionid)
+    return _clientes[chave]
 
 
-async def obter_cliente(username: str, password: str) -> Client:
+async def obter_cliente(username: str, password: str = "", sessionid: str = "") -> Client:
     """Garante um cliente logado (com cache em disco)."""
-    return await _com_lock(username, _cliente_sync, username, password)
+    chave = _chave(username, password, sessionid)
+    return await _com_lock(chave, _cliente_sync, username, password, sessionid)
 
 
 async def coletar_novas(
-    username: str, password: str, ja_vistos: dict
+    username: str, password: str, sessionid: str, ja_vistos: dict
 ) -> tuple[list[tuple[str, str, str]], dict]:
     """Retorna (mensagens novas, vistos atualizado).
     (thread_id, msg_id, texto) - apenas mensagens de outras pessoas."""
     def _coletar() -> tuple[list[tuple[str, str, str]], dict]:
-        client = _cliente_sync(username, password)
+        client = _cliente_sync(username, password, sessionid)
         vistos = dict(ja_vistos or {})
         novos: list[tuple[str, str, str]] = []
         threads = []
@@ -99,16 +113,18 @@ async def coletar_novas(
                 vistos[thread_id] = list(set(processados) | novos_ids)
         return novos, vistos
 
-    return await _com_lock(username, _coletar)
+    return await _com_lock(_chave(username, password, sessionid), _coletar)
 
 
-async def enviar_mensagem(username: str, password: str, thread_id: str, texto: str) -> None:
+async def enviar_mensagem(
+    username: str, password: str, sessionid: str, thread_id: str, texto: str
+) -> None:
     def _enviar() -> None:
-        client = _cliente_sync(username, password)
+        client = _cliente_sync(username, password, sessionid)
         try:
             client.direct_messages.send(thread_id, texto)
         except Exception as e:
             log.error("Falha ao enviar DM Instagram: %s", e)
             raise
 
-    await _com_lock(username, _enviar)
+    await _com_lock(_chave(username, password, sessionid), _enviar)

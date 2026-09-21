@@ -53,9 +53,12 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
                 cfg = canal["config"]
                 usuario = cfg.get("usuario", "")
                 senha = cfg.get("senha", "")
-                if not usuario or not senha:
+                sessionid = cfg.get("sessionid", "")
+                if not usuario or not (senha or sessionid):
                     continue
-                novos, vistos = await instagram.coletar_novas(usuario, senha, cfg.get("ig_vistos"))
+                novos, vistos = await instagram.coletar_novas(
+                    usuario, senha, sessionid, cfg.get("ig_vistos")
+                )
                 if vistos != cfg.get("ig_vistos"):
                     await repo.patch_canal_config(canal["id"], "ig_vistos", vistos)
                 for thread_id, msg_id, texto in novos:
@@ -63,7 +66,9 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
                         log.info("Instagram DM de %s (canal %s)", thread_id, canal["id"])
                         resposta = await _tratar_mensagem(canal, f"ig:{thread_id}", texto)
                         if resposta:
-                            await instagram.enviar_mensagem(usuario, senha, thread_id, resposta)
+                            await instagram.enviar_mensagem(
+                                usuario, senha, sessionid, thread_id, resposta
+                            )
                     except Exception as e:
                         log.exception("Falha ao responder DM no canal %s: %s", canal["id"], e)
         except Exception as e:
@@ -390,7 +395,9 @@ async def testar_canal(canal_id: int):
             st = await evolution.status_instancia(cfg["server_url"], cfg["apikey"], cfg["instance_name"])
             return {"ok": True, "info": st.get("instance", {}).get("state", "")}
         if canal["tipo"] == "instagram":
-            await instagram.obter_cliente(cfg["usuario"], cfg["senha"])
+            await instagram.obter_cliente(
+                cfg.get("usuario", ""), cfg.get("senha", ""), cfg.get("sessionid", "")
+            )
             return {"ok": True, "info": "logado"}
         return {"ok": True, "info": "webhook pronto"}
     except Exception as e:

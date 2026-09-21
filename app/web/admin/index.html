@@ -400,6 +400,7 @@ async function renderCanalBody(div, c) {
       (Instagram Messaging API) e usar o adapter oficial, evitando custos para você.</div>
       <p class="muted" style="margin-top:8px">Usuário: <code>${esc(c.config.usuario || "não definido")}</code>
       &middot; senha: <code>${c.config.senha ? "definida (oculta)" : "não definida"}</code>
+      &middot; sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "não definido"}</code>
       &middot; as DMs são lidas por polling automático (a cada ~25s).</p>`;
 
   } else if (tipo === "webhook") {
@@ -439,8 +440,10 @@ function camposPorTipo(tipo, config = {}, novo = false) {
   if (tipo === "instagram") return `
     <div class="grid-2">
       <div><label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${val(config.usuario)}"></div>
-      <div><label>Senha</label><input type="password" data-config="senha" value="${val(config.senha)}" placeholder="${novo ? "" : "deixe em branco para manter"}"></div>
-    </div>`;
+      <div><label>Senha (opcional se usar sessionid)</label><input type="password" data-config="senha" value="${val(config.senha)}" placeholder="${novo ? "" : "deixe em branco para manter"}"></div>
+    </div>
+    <label>sessionid (opcional — use quando o login por senha for bloqueado)</label>
+    <input type="password" data-config="sessionid" value="${val(config.sessionid)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
   if (tipo === "webhook") return `<p class="muted">Nenhuma credencial necessária. Uma URL com segredo será gerada automaticamente.</p>`;
   return "";
 }
@@ -505,7 +508,7 @@ function mostrarFormNovoCanal() {
     const config = coletarConfig(cont);
     if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
     if (tipo === "whatsapp" && (!config.server_url || !config.apikey)) { toast("Informe URL e API key da Evolution.", "err"); return; }
-    if (tipo === "instagram" && (!config.usuario || !config.senha)) { toast("Informe usuário e senha do Instagram.", "err"); return; }
+    if (tipo === "instagram" && (!config.usuario || (!config.senha && !config.sessionid))) { toast("Informe usuário e senha (ou sessionid) do Instagram.", "err"); return; }
     btn.disabled = true;
     try {
       await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
