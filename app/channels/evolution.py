@@ -68,7 +68,8 @@ def extrair_mensagem(payload: dict) -> tuple[str | str | None, str | None, dict 
     if key.get("fromMe"):
         return None, None, None
     msg = data.get("message") or {}
-    texto = msg.get("conversation") or msg.get("extendedTextMessage", {}).get("text")
+    ext = msg.get("extendedTextMessage") or {}
+    texto = msg.get("conversation") or ext.get("text")
     remote = key.get("remoteJid")
     if remote:
         remote = str(remote).split("@")[0]

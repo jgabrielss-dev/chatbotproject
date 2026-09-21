@@ -50,16 +50,17 @@ async def _com_lock(username: str, func, *args):
         return await asyncio.to_thread(func, *args)
 
 
-async def obter_cliente(username: str, password: str) -> Client:
-    """Garante um cliente logado (com cache em disco)."""
+def _cliente_sync(username: str, password: str) -> Client:
+    """Cliente logado SEM adquirir lock (uso interno dentro de _com_lock)."""
     if username in _clientes:
         return _clientes[username]
+    _clientes[username] = _login_sync(username, password)
+    return _clientes[username]
 
-    def _get():
-        _clientes[username] = _login_sync(username, password)
-        return _clientes[username]
 
-    return await _com_lock(username, _get)
+async def obter_cliente(username: str, password: str) -> Client:
+    """Garante um cliente logado (com cache em disco)."""
+    return await _com_lock(username, _cliente_sync, username, password)
 
 
 async def coletar_novas(
@@ -67,8 +68,8 @@ async def coletar_novas(
 ) -> tuple[list[tuple[str, str, str]], dict]:
     """Retorna (mensagens novas, vistos atualizado).
     (thread_id, msg_id, texto) - apenas mensagens de outras pessoas."""
-    async def _coletar() -> tuple[list[tuple[str, str, str]], dict]:
-        client = await obter_cliente(username, password)
+    def _coletar() -> tuple[list[tuple[str, str, str]], dict]:
+        client = _cliente_sync(username, password)
         vistos = dict(ja_vistos or {})
         novos: list[tuple[str, str, str]] = []
         threads = []
@@ -102,8 +103,8 @@ async def coletar_novas(
 
 
 async def enviar_mensagem(username: str, password: str, thread_id: str, texto: str) -> None:
-    async def _enviar() -> None:
-        client = await obter_cliente(username, password)
+    def _enviar() -> None:
+        client = _cliente_sync(username, password)
         try:
             client.direct_messages.send(thread_id, texto)
         except Exception as e:

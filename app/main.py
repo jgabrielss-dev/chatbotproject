@@ -249,14 +249,20 @@ async def put_canal(canal_id: int, request: Request):
     body = await request.json()
     nome = (body.get("nome") or "").strip()
     ativo = bool(body.get("ativo", True))
-    config = dict(body.get("config") or {})
+    novos = dict(body.get("config") or {})
     if not nome:
         raise HTTPException(400, "Informe um nome para o canal.")
-    r = await repo.obter_canal(canal_id)
-    if not r:
+    atual = await repo.obter_canal(canal_id)
+    if not atual:
         raise HTTPException(404, "Canal não encontrado.")
-    config["secret"] = r["config"].get("secret", _gerar_secret())
-    config["instance_name"] = r["config"].get("instance_name", config.get("instance_name", ""))
+
+    config = dict(atual["config"])
+    for chave, valor in novos.items():
+        if valor is None or (isinstance(valor, str) and not valor.strip()):
+            continue
+        config[chave] = valor.strip() if isinstance(valor, str) else valor
+    config["secret"] = atual["config"].get("secret", _gerar_secret())
+    config["instance_name"] = atual["config"].get("instance_name", config.get("instance_name", ""))
     return await repo.atualizar_canal(canal_id, nome, config, ativo)
 
 

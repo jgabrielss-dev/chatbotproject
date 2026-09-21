@@ -6,8 +6,8 @@
 <title>Chatbot Project - Gestão de Agentes</title>
 <style>
   :root {
-    --bg: #0f1117; --panel: #171a23; --border: #262b3a; --text: #e6e8ee;
-    --muted: #9aa3b5; --accent: #4f7cff; --accent-2: #38b26e;
+    --bg: #0f1117; --panel: #171a23; --panel-2: #14161f; --border: #262b3a;
+    --text: #e6e8ee; --muted: #9aa3b5; --accent: #4f7cff; --accent-2: #38b26e;
     --danger: #ef5350; --warn: #f0a53b;
   }
   * { box-sizing: border-box; }
@@ -15,31 +15,39 @@
     margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text);
     display: flex; min-height: 100vh;
   }
+  code { background: #12141c; padding: 1px 5px; border-radius: 5px; font-size: 12px; word-break: break-all; }
   aside {
-    width: 280px; padding: 16px; border-right: 1px solid var(--border); background: var(--panel);
-    overflow-y: auto;
+    width: 300px; padding: 16px; border-right: 1px solid var(--border); background: var(--panel);
+    overflow-y: auto; flex-shrink: 0;
   }
-  aside h1 { font-size: 16px; margin: 0 0 14px; }
+  aside h1 { font-size: 16px; margin: 0 0 4px; }
+  aside .sub { font-size: 11px; color: var(--muted); margin: 0 0 14px; }
   .btn {
-    display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border);
     background: #20242f; color: var(--text); padding: 7px 12px; border-radius: 8px; cursor: pointer;
-    font-size: 13px;
+    font-size: 13px; transition: filter .15s, opacity .15s; white-space: nowrap;
   }
+  .btn:hover:not(:disabled) { filter: brightness(1.15); }
   .btn.primary { background: var(--accent); border-color: var(--accent); }
   .btn.green { background: var(--accent-2); border-color: var(--accent-2); }
-  .btn.danger { color: var(--danger); }
+  .btn.danger { color: var(--danger); border-color: rgba(239,83,80,.5); }
+  .btn.sm { padding: 4px 9px; font-size: 12px; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .agente-item {
     padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
-    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 8px;
   }
-  .agente-item.active { border-color: var(--accent); }
-  .agente-item .nome { font-weight: 600; }
+  .agente-item:hover { border-color: #3a4157; }
+  .agente-item.active { border-color: var(--accent); background: rgba(79,124,255,.06); }
+  .agente-item .nome { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badge {
     font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #22283a; color: var(--muted);
+    white-space: nowrap;
   }
   .badge.on { background: rgba(56,178,110,.15); color: var(--accent-2); }
-  main { flex: 1; padding: 20px; max-width: 960px; }
+  .badge.off { background: rgba(239,83,80,.12); color: var(--danger); }
+  .badge.tipo { background: rgba(79,124,255,.15); color: #9db4ff; }
+  main { flex: 1; padding: 20px; max-width: 1000px; min-width: 0; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px;
   }
@@ -49,31 +57,52 @@
     width: 100%; background: #12141c; border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 9px 10px; font-size: 13px; font-family: inherit;
   }
-  textarea { min-height: 140px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 150px; resize: vertical; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .muted { color: var(--muted); font-size: 12px; }
+  .aviso { font-size: 12px; color: var(--muted); }
   .qrcode { text-align: center; padding: 12px; }
   .qrcode img { width: 220px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
   .warn {
     background: rgba(240,165,59,.08); border: 1px solid var(--warn); color: var(--warn);
-    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px;
+    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5;
   }
-  .kanal { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: #14161f; }
-  .kanal .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  pre { background: #12141c; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; }
-  .hidden { display: none; }
-  .aviso { font-size: 12px; color: var(--muted); }
+  .kanal { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--panel-2); }
+  .kanal .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  pre { background: #12141c; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; margin: 8px 0 0; }
+  .hidden { display: none !important; }
   .qr-status { font-size: 12px; color: var(--muted); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #toasts { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    padding: 10px 14px; border-radius: 8px; font-size: 13px; color: #fff; max-width: 360px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.35); animation: slidein .2s ease;
+  }
+  .toast.ok { background: #2e7d52; }
+  .toast.err { background: #b23b39; }
+  .toast.info { background: #3a4668; }
+  @keyframes slidein { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .inline-result { font-size: 12px; margin-left: 6px; }
+  .inline-result.ok { color: var(--accent-2); }
+  .inline-result.err { color: var(--danger); }
+  .sep { height: 1px; background: var(--border); margin: 12px 0; }
+  @media (max-width: 780px) {
+    body { flex-direction: column; }
+    aside { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+    .grid-2 { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
+<div id="toasts"></div>
+
 <aside>
   <h1>Chatbot Project</h1>
-  <div class="row" style="justify-content:space-between">
-    <button class="btn primary" id="btnNovo">+ Novo agente</button>
-  </div>
+  <p class="sub">Gestão de agentes e canais</p>
+  <button class="btn primary" id="btnNovo" style="width:100%">+ Novo agente</button>
   <div id="listaAgentes" style="margin-top:14px"></div>
-  <p class="aviso">Sem cobrança nesta fase. Todos os agentes usam a mesma chave Gemini do <code>.env</code>.</p>
+  <p class="aviso">Sem cobrança nesta fase. Todos os agentes usam a mesma chave Gemini configurada no servidor.</p>
 </aside>
 
 <main>
@@ -82,8 +111,8 @@
     <label>Nome</label>
     <input type="text" id="nome" placeholder="Ex.: NutriTreino">
     <label>System prompt (regras e personalidade da IA)</label>
-    <textarea id="prompt" placeholder="Você é um assistente..."></textarea>
-    <label class="row"><input type="checkbox" id="ativo" checked> Agente ativo</label>
+    <textarea id="prompt" placeholder="Você é um assistente que..."></textarea>
+    <label class="row" style="margin-top:10px"><input type="checkbox" id="ativo" checked> Agente ativo</label>
     <div class="row" style="margin-top:12px">
       <button class="btn primary" id="btnSalvar">Salvar</button>
       <button class="btn" id="btnCancelar">Cancelar</button>
@@ -99,21 +128,24 @@
           <button class="btn danger" id="btnExcluirAgente">Excluir agente</button>
         </div>
       </div>
-      <div id="promptPreview" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
-      <span class="badge" id="badgeAtivo">—</span>
+      <div class="row" style="margin-top:8px"><span class="badge" id="badgeAtivo">—</span></div>
+      <div id="promptPreview" class="muted" style="margin-top:10px;white-space:pre-wrap"></div>
     </div>
 
     <div class="card">
-      <h2>Canais (locais onde o agente responde)</h2>
-      <div class="row" style="margin-bottom:12px">
-        <select id="novoCanalTipo" style="width:160px">
-          <option value="telegram">Telegram</option>
-          <option value="whatsapp">WhatsApp</option>
-          <option value="instagram">Instagram</option>
-          <option value="webhook">Webhook genérico</option>
-        </select>
-        <button class="btn primary" id="btnNovoCanal">+ Novo canal</button>
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h2 style="margin:0">Canais</h2>
+        <div class="row">
+          <select id="novoCanalTipo" style="width:170px">
+            <option value="telegram">Telegram</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="instagram">Instagram</option>
+            <option value="webhook">Webhook genérico</option>
+          </select>
+          <button class="btn primary" id="btnNovoCanal">+ Novo canal</button>
+        </div>
       </div>
+      <div id="novoCanalForm" class="hidden"></div>
       <div id="canais"></div>
     </div>
   </div>
@@ -122,18 +154,30 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let agentes = [], agenteAtual = null, editandoAgente = null;
+const timers = {};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function toast(msg, tipo = "info") {
+  const el = document.createElement("div");
+  el.className = "toast " + tipo;
+  el.textContent = msg;
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
 
 const api = async (url, opts = {}) => {
-  const r = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!r.ok) {
-    const t = await r.text();
-    throw new Error(t || r.statusText);
+    let msg = r.statusText;
+    try { const j = await r.json(); msg = j.detail || JSON.stringify(j); } catch (e) { try { msg = await r.text(); } catch (e2) {} }
+    throw new Error(msg || ("Erro " + r.status));
   }
   return r.status === 204 ? null : r.json();
 };
+
+/* ---------------- Agentes ---------------- */
 
 async function carregarAgentes() {
   agentes = await api("/api/agentes");
@@ -143,207 +187,32 @@ async function carregarAgentes() {
 function renderAgentes() {
   const el = $("listaAgentes");
   el.innerHTML = "";
+  if (!agentes.length) {
+    el.innerHTML = '<p class="aviso">Nenhum agente ainda. Crie o primeiro em "+ Novo agente".</p>';
+    return;
+  }
   for (const a of agentes) {
     const d = document.createElement("div");
     d.className = "agente-item" + (agenteAtual && agenteAtual.id === a.id ? " active" : "");
     d.innerHTML = `<span class="nome">${esc(a.nome)}</span>
-      <span class="badge ${a.ativo ? "on" : ""}">${a.ativo ? "ativo" : "pausado"}</span>`;
+      <span class="badge ${a.ativo ? "on" : "off"}">${a.ativo ? "ativo" : "pausado"}</span>`;
     d.onclick = () => abrirAgente(a.id);
     el.appendChild(d);
   }
 }
 
-function esc(s) { return String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
-
 async function abrirAgente(id) {
   agenteAtual = agentes.find((a) => a.id === id) || null;
+  if (!agenteAtual) return;
   renderAgentes();
   $("agenteForm").classList.add("hidden");
+  $("novoCanalForm").classList.add("hidden");
   $("detalhe").classList.remove("hidden");
   $("detalheNome").textContent = agenteAtual.nome;
   $("badgeAtivo").textContent = agenteAtual.ativo ? "ativo" : "pausado";
-  $("badgeAtivo").className = "badge" + (agenteAtual.ativo ? " on" : "");
+  $("badgeAtivo").className = "badge " + (agenteAtual.ativo ? "on" : "off");
   $("promptPreview").textContent = agenteAtual.system_prompt || "(sem prompt)";
-  carregarCanais(id);
-}
-
-async function carregarCanais(agenteId) {
-  const canais = await api(`/api/agentes/${agenteId}/canais`);
-  const el = $("canais");
-  el.innerHTML = "";
-  if (!canais.length) {
-    el.innerHTML = `<p class="aviso">Nenhum canal ainda. Crie um para o agente começar a responder.</p>`;
-    return;
-  }
-  for (const c of canais) el.appendChild(renderCanal(c));
-}
-
-function renderCanal(c) {
-  const div = document.createElement("div");
-  div.className = "kanal";
-  const tipo = c.tipo.charAt(0).toUpperCase() + c.tipo.slice(1);
-  div.innerHTML = `
-    <div class="head">
-      <strong>${esc(c.nome)} <span class="badge">${tipo}</span>
-        <span class="badge ${c.ativo ? "on" : ""}">${c.ativo ? "ativo" : "pausado"}</span></strong>
-      <div class="row">
-        <button class="btn" data-acao="testar">Testar</button>
-        <button class="btn" data-acao="editar">Editar</button>
-        <button class="btn danger" data-acao="excluir">Excluir</button>
-      </div>
-    </div>
-    <div class="kanal-body"></div>
-  `;
-  div.querySelector('[data-acao="testar"]').onclick = () => testar(c.id, c.tipo);
-  div.querySelector('[data-acao="excluir"]').onclick = async () => {
-    if (!confirm("Excluir canal?")) return;
-    await api(`/api/canais/${c.id}`, { method: "DELETE" });
-    carregarCanais(agenteAtual.id);
-  };
-  div.querySelector('[data-acao="editar"]').onclick = async () => {
-    const form = await renderFormCanal(c);
-    const body = div.querySelector(".kanal-body");
-    body.replaceChildren(form);
-  };
-  renderCanalBody(div, c);
-  return div;
-}
-
-async function webhookUrl(c) {
-  try { return (await api(`/api/canais/${c.id}/webhook-url`)).url; } catch (e) { return ""; }
-}
-
-async function renderCanalBody(div, c) {
-  const body = div.querySelector(".kanal-body");
-  const tipo = c.tipo;
-  if (tipo === "telegram") {
-    const url = await webhookUrl(c);
-    body.innerHTML = `
-      <p class="muted">Bot token: <code>${esc(c.config.token || "não definido")}</code></p>
-      <label>Webhook a registrar no bot</label>
-      <input type="text" readonly value="${esc(url)}">
-      <div class="row" style="margin-top:8px">
-        <button class="btn green" id="tgSet">Registrar webhook (setWebhook)</button>
-      </div>`;
-    body.querySelector("#tgSet").onclick = async (btn) => {
-      btn.disabled = true;
-      try { const r = await api(`/api/canais/${c.id}/telegram/set-webhook`, { method: "POST" }); alert("Webhook configurado p/ @" + r.bot + "!"); }
-      catch (e) { alert("Erro: " + e.message); }
-      btn.disabled = false;
-    };
-  } else if (tipo === "whatsapp") {
-    const url = await webhookUrl(c);
-    const estado = c.config.status || "conectando";
-    body.innerHTML = `
-      <p class="muted">Instância Evolution: <code>${esc(c.config.instance_name || "")}</code></p>
-      <div class="row">
-        <button class="btn primary" id="waConectar">Conectar (gerar QR)</button>
-        <button class="btn danger" id="waDesc">Desconectar</button>
-      </div>
-      <div class="qrcode">
-        <div id="waQR"></div>
-        <span class="qr-status" id="waStatus">Status: ${esc(estado)}</span>
-      </div>`;
-    let timer = null;
-    const mostrarQR = async () => {
-      try {
-        const r = await api(`/api/canais/${c.id}/whatsapp/qr`);
-        const qrEl = body.querySelector("#waQR");
-        const stEl = body.querySelector("#waStatus");
-        stEl.textContent = "Status: " + r.status;
-        if (r.qr) {
-          qrEl.innerHTML = `<img src="data:image/png;base64,${r.qr}" alt="QR">`;
-          clearInterval(timer); timer = setInterval(mostrarQR, 3000);
-        } else if (r.status === "open") {
-          qrEl.innerHTML = `<p class="badge on">Conectado!</p>`;
-          clearInterval(timer);
-        } else qrEl.innerHTML = "";
-      } catch (e) { /* ainda sem instância */ }
-    };
-    body.querySelector("#waConectar").onclick = async (btn) => {
-      btn.disabled = true;
-      try {
-        const r = await api(`/api/canais/${c.id}/whatsapp/conectar`, { method: "POST" });
-        if (r.status === "open") { clearInterval(timer); body.querySelector("#waStatus").textContent = "Status: open"; }
-        else { mostrarQR(); timer = timer || setInterval(mostrarQR, 5000); }
-      } catch (e) { alert("Erro: " + e.message); }
-      btn.disabled = false;
-    };
-    body.querySelector("#waDesc").onclick = async () => {
-      await api(`/api/canais/${c.id}/whatsapp/desconectar`, { method: "POST" });
-      clearInterval(timer);
-      body.querySelector("#waQR").innerHTML = "";
-      body.querySelector("#waStatus").textContent = "Status: desconectado";
-    };
-    mostrarQR();
-  } else if (tipo === "instagram") {
-    body.innerHTML = `
-      <div class="warn"><strong>Aviso:</strong> este canal usa método NÃO-oficial (instagrapi) e viola os termos da Meta — pode quebrar a qualquer momento ou bloquear a conta. Para uso estável, o cliente deve obter a API oficial da Meta (Instagram Messaging API) e usar o adapter oficial, evitando custos para você.</div>
-      <p class="muted" style="margin-top:8px">Usuário: <code>${esc(c.config.usuario || "não definido")}</code> — as DMs são lidas por polling automático.</p>`;
-  } else if (tipo === "webhook") {
-    const url = await webhookUrl(c);
-    body.innerHTML = `
-      <p class="muted">URL a ser usada pelo cliente (POST JSON <code>{ "text": ..., "user": ... }</code> → responde com <code>{ "reply": ... }</code>):</p>
-      <input type="text" readonly value="${esc(url)}">
-      <pre>curl -X POST "${esc(url)}" -H "Content-Type: application/json" -d '{"text":"oi","user":"cliente1"}'</pre>`;
-  }
-}
-
-async function testar(canalId, tipo) {
-  try {
-    const r = await api(`/api/canais/${canalId}/testar`, { method: "POST" });
-    alert("OK: " + (r.info || "conectado"));
-  } catch (e) {
-    alert("Falha: " + e.message);
-  }
-}
-
-function renderFormCanal(c) {
-  const tipo = c.tipo;
-  const config = c.config || {};
-  const div = document.createElement("div");
-  div.innerHTML = `
-    <label>Nome do canal</label>
-    <input type="text" id="cNome" value="${esc(c.nome)}">
-    <label>Ativo</label>
-    <select id="cAtivo"><option value="true">Sim</option><option value="false">Não</option></select>
-    ${renderCampos(tipo, config)}
-    <div class="row" style="margin-top:12px">
-      <button class="btn primary" id="cSalvar">Salvar canal</button>
-      <button class="btn" id="cCancelar">Cancelar</button>
-    </div>`;
-  div.querySelector("#cAtivo").value = String(c.ativo);
-  div.querySelector("#cCancelar").onclick = () => renderCanalBody(div, c);
-  div.querySelector("#cSalvar").onclick = async (btn) => {
-    btn.disabled = true;
-    const config2 = {};
-    div.querySelectorAll("[data-config]").forEach((i) => {
-      config2[i.dataset.config] = i.type === "password" ? i.value.trim() : i.value.trim();
-    });
-    try {
-      await api(`/api/canais/${c.id}`, { method: "PUT", body: JSON.stringify({
-        nome: div.querySelector("#cNome").value.trim(),
-        ativo: div.querySelector("#cAtivo").value === "true",
-        config: config2,
-      })});
-      await carregarCanais(agenteAtual.id);
-    } catch (e) { alert("Erro: " + e.message); }
-    btn.disabled = false;
-  };
-  return div;
-}
-
-function renderCampos(tipo, config = {}) {
-  if (tipo === "telegram") return `<label>Token do bot</label><input type="password" data-config="token" value="${esc(config.token || "")}">`;
-  if (tipo === "whatsapp") return `
-    <label>URL do servidor Evolution (sua instância)</label>
-    <input type="text" data-config="server_url" placeholder="https://sua-evolution-api.com" value="${esc(config.server_url || "")}">
-    <label>API key global da Evolution</label>
-    <input type="password" data-config="apikey" value="${esc(config.apikey || "")}">`;
-  if (tipo === "instagram") return `
-    <label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${esc(config.usuario || "")}">
-    <label>Senha</label><input type="password" data-config="senha" value="${esc(config.senha || "")}">`;
-  return "";
+  await carregarCanais(id);
 }
 
 $("btnNovo").onclick = () => {
@@ -352,20 +221,24 @@ $("btnNovo").onclick = () => {
   $("formTitle").textContent = "Novo agente";
   $("agenteForm").classList.remove("hidden");
   $("detalhe").classList.add("hidden");
+  renderAgentes();
 };
 
 $("btnCancelar").onclick = () => { $("agenteForm").classList.add("hidden"); renderAgentes(); };
 
-$("btnSalvar").onclick = async () => {
+$("btnSalvar").onclick = async (e) => {
+  const btn = e.currentTarget;
   const nome = $("nome").value.trim(), prompt = $("prompt").value.trim();
-  if (!nome || !prompt) { alert("Preencha nome e system prompt."); return; }
+  if (!nome || !prompt) { toast("Preencha nome e system prompt.", "err"); return; }
   const body = JSON.stringify({ nome, system_prompt: prompt, ativo: $("ativo").checked });
+  btn.disabled = true;
   try {
-    if (editandoAgente) await api(`/api/agentes/${editandoAgente}`, { method: "PUT", body });
-    else await api("/api/agentes", { method: "POST", body });
+    if (editandoAgente) { await api(`/api/agentes/${editandoAgente}`, { method: "PUT", body }); toast("Agente atualizado.", "ok"); }
+    else { const r = await api("/api/agentes", { method: "POST", body }); toast("Agente criado.", "ok"); editandoAgente = null; }
     $("agenteForm").classList.add("hidden");
     await carregarAgentes();
-  } catch (e) { alert("Erro: " + e.message); }
+  } catch (err) { toast("Erro: " + err.message, "err"); }
+  btn.disabled = false;
 };
 
 $("btnEditar").onclick = () => {
@@ -378,31 +251,275 @@ $("btnEditar").onclick = () => {
 };
 
 $("btnExcluirAgente").onclick = async () => {
-  if (!confirm("Excluir agente e todos os canais?")) return;
-  await api(`/api/agentes/${agenteAtual.id}`, { method: "DELETE" });
-  agenteAtual = null;
-  $("detalhe").classList.add("hidden");
-  await carregarAgentes();
+  if (!confirm("Excluir o agente \"" + agenteAtual.nome + "\" e todos os canais dele?")) return;
+  try {
+    await api(`/api/agentes/${agenteAtual.id}`, { method: "DELETE" });
+    toast("Agente excluído.", "ok");
+    agenteAtual = null;
+    $("detalhe").classList.add("hidden");
+    await carregarAgentes();
+  } catch (e) { toast("Erro: " + e.message, "err"); }
 };
 
-$("btnNovoCanal").onclick = async () => {
-  const tipo = $("novoCanalTipo").value;
-  const nome = prompt("Nome do canal (ex.: WhatsApp do cliente A):");
-  if (!nome) return;
-  const config = {};
-  if (tipo === "telegram") config.token = prompt("Token do bot do Telegram:");
-  if (tipo === "whatsapp") {
-    config.server_url = prompt("URL do seu servidor Evolution API (ex.: https://evolution-api.com):");
-    config.apikey = prompt("API key global da Evolution:");
+/* ---------------- Canais ---------------- */
+
+async function carregarCanais(agenteId) {
+  Object.values(timers).forEach(clearInterval);
+  const canais = await api(`/api/agentes/${agenteId}/canais`);
+  const el = $("canais");
+  el.innerHTML = "";
+  if (!canais.length) {
+    el.innerHTML = '<p class="aviso">Nenhum canal ainda. Crie um para o agente começar a responder.</p>';
+    return;
   }
-  if (tipo === "instagram") {
-    config.usuario = prompt("Usuário do Instagram:");
-    config.senha = prompt("Senha do Instagram:");
+  for (const c of canais) el.appendChild(renderCanal(c));
+}
+
+function renderCanal(c) {
+  const div = document.createElement("div");
+  div.className = "kanal";
+  const tipo = c.tipo.charAt(0).toUpperCase() + c.tipo.slice(1);
+  div.innerHTML = `
+    <div class="head">
+      <span><strong>${esc(c.nome)}</strong>
+        <span class="badge tipo">${tipo}</span>
+        <span class="badge ${c.ativo ? "on" : "off"}">${c.ativo ? "ativo" : "pausado"}</span></span>
+      <span class="row">
+        <button class="btn sm" data-acao="testar">Testar</button>
+        <button class="btn sm" data-acao="editar">Editar</button>
+        <button class="btn sm danger" data-acao="excluir">Excluir</button>
+      </span>
+    </div>
+    <div class="kanal-body"></div>`;
+  div.querySelector('[data-acao="testar"]').onclick = (e) => testar(c.id, e.currentTarget);
+  div.querySelector('[data-acao="excluir"]').onclick = async () => {
+    if (!confirm("Excluir o canal \"" + c.nome + "\"?")) return;
+    try { await api(`/api/canais/${c.id}`, { method: "DELETE" }); toast("Canal excluído.", "ok"); carregarCanais(agenteAtual.id); }
+    catch (e) { toast("Erro: " + e.message, "err"); }
+  };
+  div.querySelector('[data-acao="editar"]').onclick = () => {
+    const body = div.querySelector(".kanal-body");
+    body.replaceChildren(formCanal(c, () => renderCanalBody(div, c)));
+  };
+  renderCanalBody(div, c);
+  return div;
+}
+
+async function webhookUrl(c) {
+  try { return (await api(`/api/canais/${c.id}/webhook-url`)).url; } catch (e) { return ""; }
+}
+
+function copiar(texto, btn) {
+  navigator.clipboard.writeText(texto).then(
+    () => { const o = btn.textContent; btn.textContent = "Copiado!"; setTimeout(() => (btn.textContent = o), 1500); },
+    () => toast("Não foi possível copiar.", "err")
+  );
+}
+
+async function renderCanalBody(div, c) {
+  const body = div.querySelector(".kanal-body");
+  const tipo = c.tipo;
+
+  if (tipo === "telegram") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">Token do bot: <code>${c.config.token ? "definido (oculto)" : "não definido"}</code></p>
+      <label>Webhook a registrar no bot</label>
+      <div class="row"><input type="text" readonly value="${esc(url)}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn green" id="tgSet">Registrar webhook (setWebhook)</button>
+        <span class="inline-result" id="tgRes"></span>
+      </div>`;
+    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
+    body.querySelector("#tgSet").onclick = async (e) => {
+      const btn = e.currentTarget, res = body.querySelector("#tgRes");
+      btn.disabled = true; res.textContent = "registrando..."; res.className = "inline-result";
+      try { const r = await api(`/api/canais/${c.id}/telegram/set-webhook`, { method: "POST" });
+        res.textContent = "OK: @" + r.bot; res.className = "inline-result ok"; toast("Webhook do Telegram configurado.", "ok"); }
+      catch (err) { res.textContent = "Erro: " + err.message; res.className = "inline-result err"; toast("Erro: " + err.message, "err"); }
+      btn.disabled = false;
+    };
+
+  } else if (tipo === "whatsapp") {
+    const url = await webhookUrl(c);
+    const estado = c.config.status || "desconectado";
+    body.innerHTML = `
+      <p class="muted">Instância Evolution: <code>${esc(c.config.instance_name || "")}</code>
+        &middot; servidor: <code>${esc(c.config.server_url || "não definido")}</code></p>
+      <label>Webhook (configurado automaticamente na Evolution)</label>
+      <div class="row"><input type="text" readonly value="${esc(url)}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="waConectar">Conectar (gerar QR)</button>
+        <button class="btn danger" id="waDesc">Desconectar</button>
+      </div>
+      <div class="qrcode">
+        <div id="waQR"></div>
+        <span class="qr-status" id="waStatus">Status: ${esc(estado)}</span>
+      </div>`;
+    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
+    const mostrarQR = async () => {
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/qr`);
+        const qrEl = body.querySelector("#waQR"), stEl = body.querySelector("#waStatus");
+        if (!qrEl || !stEl) { clearInterval(timers[c.id]); return; }
+        stEl.textContent = "Status: " + r.status;
+        if (r.qr) {
+          qrEl.innerHTML = `<img src="data:image/png;base64,${r.qr}" alt="QR">`;
+          if (!timers[c.id]) timers[c.id] = setInterval(mostrarQR, 3000);
+        } else if (r.status === "open") {
+          qrEl.innerHTML = '<p class="badge on">Conectado!</p>';
+          clearInterval(timers[c.id]); delete timers[c.id];
+        }
+      } catch (e) { /* instância ainda não criada */ }
+    };
+    body.querySelector("#waConectar").onclick = async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/conectar`, { method: "POST" });
+        toast("Instância criada. Escaneie o QR Code.", "ok");
+        if (r.status === "open") { body.querySelector("#waStatus").textContent = "Status: open"; }
+        else { mostrarQR(); timers[c.id] = timers[c.id] || setInterval(mostrarQR, 5000); }
+      } catch (err) { toast("Erro: " + err.message, "err"); }
+      btn.disabled = false;
+    };
+    body.querySelector("#waDesc").onclick = async () => {
+      try { await api(`/api/canais/${c.id}/whatsapp/desconectar`, { method: "POST" }); } catch (e) {}
+      clearInterval(timers[c.id]); delete timers[c.id];
+      body.querySelector("#waQR").innerHTML = "";
+      body.querySelector("#waStatus").textContent = "Status: desconectado";
+      toast("WhatsApp desconectado.", "ok");
+    };
+    mostrarQR();
+
+  } else if (tipo === "instagram") {
+    body.innerHTML = `
+      <div class="warn"><strong>Aviso:</strong> este canal usa método NÃO-oficial (instagrapi), viola os termos da Meta,
+      pode quebrar a qualquer momento ou bloquear a conta. Para uso estável, o cliente deve obter a API oficial da Meta
+      (Instagram Messaging API) e usar o adapter oficial, evitando custos para você.</div>
+      <p class="muted" style="margin-top:8px">Usuário: <code>${esc(c.config.usuario || "não definido")}</code>
+      &middot; senha: <code>${c.config.senha ? "definida (oculta)" : "não definida"}</code>
+      &middot; as DMs são lidas por polling automático (a cada ~25s).</p>`;
+
+  } else if (tipo === "webhook") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">URL para o cliente integrar (POST JSON <code>{ "text": ..., "user": ... }</code> → responde <code>{ "reply": ... }</code>):</p>
+      <div class="row"><input type="text" readonly value="${esc(url)}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <pre>curl -X POST "${esc(url)}" -H "Content-Type: application/json" -d '{"text":"oi","user":"cliente1"}'</pre>`;
+    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
   }
+}
+
+async function testar(canalId, btn) {
+  const o = btn.textContent;
+  btn.disabled = true; btn.textContent = "Testando...";
   try {
-    await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
-    await carregarCanais(agenteAtual.id);
-  } catch (e) { alert("Erro: " + e.message); }
+    const r = await api(`/api/canais/${canalId}/testar`, { method: "POST" });
+    toast("OK: " + (r.info || "conectado"), "ok");
+  } catch (e) { toast("Falha: " + e.message, "err"); }
+  btn.disabled = false; btn.textContent = o;
+}
+
+/* ---------------- Formulários de canal ---------------- */
+
+function camposPorTipo(tipo, config = {}, novo = false) {
+  const ph = (v, dica) => (novo ? "" : (v ? dica : ""));
+  const val = (v) => (novo ? "" : esc(v || ""));
+  if (tipo === "telegram") return `
+    <label>Token do bot (BotFather)</label>
+    <input type="password" data-config="token" value="${val(config.token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
+  if (tipo === "whatsapp") return `
+    <label>URL do servidor Evolution</label>
+    <input type="text" data-config="server_url" value="${val(config.server_url)}" placeholder="https://sua-evolution-api.com">
+    <label>API key global da Evolution</label>
+    <input type="password" data-config="apikey" value="${val(config.apikey)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
+  if (tipo === "instagram") return `
+    <div class="grid-2">
+      <div><label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${val(config.usuario)}"></div>
+      <div><label>Senha</label><input type="password" data-config="senha" value="${val(config.senha)}" placeholder="${novo ? "" : "deixe em branco para manter"}"></div>
+    </div>`;
+  if (tipo === "webhook") return `<p class="muted">Nenhuma credencial necessária. Uma URL com segredo será gerada automaticamente.</p>`;
+  return "";
+}
+
+function coletarConfig(form) {
+  const config = {};
+  form.querySelectorAll("[data-config]").forEach((i) => { config[i.dataset.config] = i.value.trim(); });
+  return config;
+}
+
+function formCanal(c, onCancel) {
+  const div = document.createElement("div");
+  div.innerHTML = `
+    <label>Nome do canal</label>
+    <input type="text" id="cNome" value="${esc(c.nome)}">
+    <label>Ativo</label>
+    <select id="cAtivo"><option value="true">Sim</option><option value="false">Não</option></select>
+    ${camposPorTipo(c.tipo, c.config, false)}
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="cSalvar">Salvar canal</button>
+      <button class="btn" id="cCancelar">Cancelar</button>
+    </div>`;
+  div.querySelector("#cAtivo").value = String(c.ativo);
+  div.querySelector("#cCancelar").onclick = () => onCancel();
+  div.querySelector("#cSalvar").onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try {
+      await api(`/api/canais/${c.id}`, { method: "PUT", body: JSON.stringify({
+        nome: div.querySelector("#cNome").value.trim(),
+        ativo: div.querySelector("#cAtivo").value === "true",
+        config: coletarConfig(div),
+      })});
+      toast("Canal atualizado.", "ok");
+      await carregarCanais(agenteAtual.id);
+    } catch (err) { toast("Erro: " + err.message, "err"); btn.disabled = false; }
+  };
+  return div;
+}
+
+$("novoCanalTipo").onchange = () => { if (!$("novoCanalForm").classList.contains("hidden")) mostrarFormNovoCanal(); };
+
+function mostrarFormNovoCanal() {
+  const tipo = $("novoCanalTipo").value;
+  const cont = $("novoCanalForm");
+  cont.innerHTML = `
+    <div class="card" style="background:#14161f;margin:0 0 12px">
+      <h2>Novo canal: ${tipo}</h2>
+      <label>Nome do canal</label>
+      <input type="text" id="nNome" placeholder="Ex.: WhatsApp do cliente A">
+      ${camposPorTipo(tipo, {}, true)}
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="nCriar">Criar canal</button>
+        <button class="btn" id="nCancelar">Cancelar</button>
+      </div>
+    </div>`;
+  cont.classList.remove("hidden");
+  cont.querySelector("#nCancelar").onclick = () => cont.classList.add("hidden");
+  cont.querySelector("#nCriar").onclick = async (e) => {
+    const btn = e.currentTarget;
+    const nome = cont.querySelector("#nNome").value.trim();
+    if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
+    const config = coletarConfig(cont);
+    if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
+    if (tipo === "whatsapp" && (!config.server_url || !config.apikey)) { toast("Informe URL e API key da Evolution.", "err"); return; }
+    if (tipo === "instagram" && (!config.usuario || !config.senha)) { toast("Informe usuário e senha do Instagram.", "err"); return; }
+    btn.disabled = true;
+    try {
+      await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
+      toast("Canal criado.", "ok");
+      cont.classList.add("hidden");
+      await carregarCanais(agenteAtual.id);
+    } catch (err) { toast("Erro: " + err.message, "err"); btn.disabled = false; }
+  };
+}
+
+$("btnNovoCanal").onclick = () => {
+  const cont = $("novoCanalForm");
+  if (!cont.classList.contains("hidden")) { cont.classList.add("hidden"); return; }
+  mostrarFormNovoCanal();
 };
 
 carregarAgentes();
