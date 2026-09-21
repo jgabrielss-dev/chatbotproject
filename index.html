@@ -348,23 +348,18 @@ async function renderCanalBody(div, c) {
     };
 
   } else if (tipo === "whatsapp") {
-    const url = await webhookUrl(c);
     const estado = c.config.status || "desconectado";
     body.innerHTML = `
-      <p class="muted">Instância Evolution: <code>${esc(c.config.instance_name || "")}</code>
-        &middot; servidor: <code>${esc(c.config.server_url || "não definido")}</code></p>
-      <label>Webhook (configurado automaticamente na Evolution)</label>
-      <div class="row"><input type="text" readonly value="${esc(url)}">
-        <button class="btn sm" data-copy>Copiar</button></div>
+      <p class="muted">Instância: <code>${esc(c.config.instance_name || "")}</code>
+        &middot; escaneie o QR com o WhatsApp no celular que será usado pelo bot.</p>
       <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="waConectar">Conectar (gerar QR)</button>
+        <button class="btn" id="waConectar">Gerar novo QR</button>
         <button class="btn danger" id="waDesc">Desconectar</button>
       </div>
       <div class="qrcode">
         <div id="waQR"></div>
         <span class="qr-status" id="waStatus">Status: ${esc(estado)}</span>
       </div>`;
-    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
     const mostrarQR = async () => {
       try {
         const r = await api(`/api/canais/${c.id}/whatsapp/qr`);
@@ -384,7 +379,7 @@ async function renderCanalBody(div, c) {
       const btn = e.currentTarget; btn.disabled = true;
       try {
         const r = await api(`/api/canais/${c.id}/whatsapp/conectar`, { method: "POST" });
-        toast("Instância criada. Escaneie o QR Code.", "ok");
+        toast("Novo QR gerado. Escaneie com o WhatsApp.", "ok");
         if (r.status === "open") { body.querySelector("#waStatus").textContent = "Status: open"; }
         else { mostrarQR(); timers[c.id] = timers[c.id] || setInterval(mostrarQR, 5000); }
       } catch (err) { toast("Erro: " + err.message, "err"); }
@@ -439,10 +434,8 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     <label>Token do bot (BotFather)</label>
     <input type="password" data-config="token" value="${val(config.token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
   if (tipo === "whatsapp") return `
-    <label>URL do servidor Evolution</label>
-    <input type="text" data-config="server_url" value="${val(config.server_url)}" placeholder="https://sua-evolution-api.com">
-    <label>API key global da Evolution</label>
-    <input type="password" data-config="apikey" value="${val(config.apikey)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
+    <p class="muted">Nenhuma credencial necessária — a plataforma já possui a Evolution configurada.
+      Uma instância nova será criada e o QR Code exibido em seguida.</p>`;
   if (tipo === "instagram") return `
     <div class="grid-2">
       <div><label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${val(config.usuario)}"></div>
@@ -514,7 +507,6 @@ function mostrarFormNovoCanal() {
     if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
     const config = coletarConfig(cont);
     if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
-    if (tipo === "whatsapp" && (!config.server_url || !config.apikey)) { toast("Informe URL e API key da Evolution.", "err"); return; }
     if (tipo === "instagram" && (!config.usuario || (!config.senha && !config.sessionid))) { toast("Informe usuário e senha (ou sessionid) do Instagram.", "err"); return; }
     btn.disabled = true;
     try {

@@ -49,6 +49,13 @@ async def desconectar(server_url: str, apikey: str, instance_name: str) -> None:
         await client.delete(url, headers={"apikey": apikey})
 
 
+async def deletar_instancia(server_url: str, apikey: str, instance_name: str) -> None:
+    url = f"{server_url.rstrip('/')}/instance/delete/{instance_name}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.delete(url, headers={"apikey": apikey})
+        resp.raise_for_status()
+
+
 async def enviar_mensagem(
     server_url: str, apikey: str, instance_name: str, numero: str, texto: str
 ) -> None:

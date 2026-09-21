@@ -19,6 +19,12 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "")
     base_url: str = os.getenv("BASE_URL", "").rstrip("/")
     evolution_instance_prefix: str = os.getenv("EVOLUTION_INSTANCE_PREFIX", "ag").lower()
+    evolution_api_url: str = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
+    evolution_api_key: str = os.getenv("EVOLUTION_API_KEY", "")
+
+    @property
+    def has_evolution(self) -> bool:
+        return bool(self.evolution_api_url and self.evolution_api_key)
 
     @property
     def has_gemini(self) -> bool:

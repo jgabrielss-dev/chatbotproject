@@ -84,21 +84,19 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
 # --------------------------------------------------------------------------
 
 async def _keepalive_evolution(intervalo: float = 240.0) -> None:
+    if not settings.has_evolution:
+        return
     log.info("Keepalive Evolution iniciado")
+    url, key = settings.evolution_api_url, settings.evolution_api_key
     while True:
         try:
             canais = [c for c in await repo.listar_canais() if c["tipo"] == "whatsapp" and c["ativo"]]
-            vistos: set[str] = set()
-            for canal in canais:
-                cfg = canal["config"]
-                chave = (cfg.get("server_url") or "").rstrip("/")
-                if not chave or chave in vistos:
-                    continue
-                vistos.add(chave)
+            instancias = [c["config"]["instance_name"] for c in canais if c["config"].get("instance_name")]
+            if not instancias:
+                instancias = ["_"]
+            for instancia in instancias:
                 try:
-                    await evolution.status_instancia(
-                        chave, cfg.get("apikey", ""), cfg.get("instance_name", "_")
-                    )
+                    await evolution.status_instancia(url, key, instancia)
                 except Exception:
                     pass
         except Exception as e:
@@ -254,8 +252,18 @@ async def put_agente(agente_id: int, request: Request):
 
 @app.delete("/api/agentes/{agente_id}")
 async def delete_agente(agente_id: int):
+    canais = await repo.listar_canais(agente_id)
     if not await repo.excluir_agente(agente_id):
         raise HTTPException(404, "Agente não encontrado.")
+    if settings.has_evolution:
+        for c in canais:
+            if c["tipo"] == "whatsapp" and c["config"].get("instance_name"):
+                try:
+                    await evolution.deletar_instancia(
+                        settings.evolution_api_url, settings.evolution_api_key, c["config"]["instance_name"]
+                    )
+                except Exception as e:
+                    log.warning("Falha ao remover instância %s: %s", c["config"]["instance_name"], e)
     return {"ok": True}
 
 
@@ -288,6 +296,19 @@ async def post_canal(agente_id: int, request: Request):
     config["secret"] = _gerar_secret()
     if tipo == "whatsapp":
         config["instance_name"] = f"{settings.evolution_instance_prefix}{agente_id}x{secrets.token_hex(3)}"
+        canal = await repo.criar_canal(agente_id, tipo, nome, config)
+        try:
+            qr = await _conectar_whatsapp(canal)
+            canal = await repo.obter_canal(canal["id"])
+            canal["config"]["qr"] = qr
+            canal["config"]["status"] = canal["config"].get("status", "scanning")
+            return canal
+        except HTTPException:
+            await repo.excluir_canal(canal["id"])
+            raise
+        except Exception as e:
+            await repo.excluir_canal(canal["id"])
+            raise HTTPException(400, f"Falha ao iniciar WhatsApp: {e}")
     return await repo.criar_canal(agente_id, tipo, nome, config)
 
 
@@ -315,8 +336,17 @@ async def put_canal(canal_id: int, request: Request):
 
 @app.delete("/api/canais/{canal_id}")
 async def delete_canal(canal_id: int):
-    if not await repo.excluir_canal(canal_id):
+    canal = await repo.obter_canal(canal_id)
+    if not canal:
         raise HTTPException(404, "Canal não encontrado.")
+    await repo.excluir_canal(canal_id)
+    if canal["tipo"] == "whatsapp" and settings.has_evolution and canal["config"].get("instance_name"):
+        try:
+            await evolution.deletar_instancia(
+                settings.evolution_api_url, settings.evolution_api_key, canal["config"]["instance_name"]
+            )
+        except Exception as e:
+            log.warning("Falha ao remover instância Evolution do canal %s: %s", canal_id, e)
     return {"ok": True}
 
 
@@ -361,29 +391,41 @@ async def set_telegram_webhook(canal_id: int):
         raise HTTPException(400, f"Falha ao configurar webhook: {e}")
 
 
+def _evo_creds() -> tuple[str, str]:
+    if not settings.has_evolution:
+        raise HTTPException(400, "Evolution não configurada (defina EVOLUTION_API_URL e EVOLUTION_API_KEY no .env).")
+    return settings.evolution_api_url, settings.evolution_api_key
+
+
+async def _conectar_whatsapp(canal: dict) -> str:
+    """Cria a instância na Evolution (ou usa a existente) e devolve o QR."""
+    url, key = _evo_creds()
+    nome = canal["config"].get("instance_name", "")
+    if not nome:
+        raise HTTPException(400, "Instância não definida para este canal.")
+    try:
+        await evolution.criar_instancia(url, key, nome, _url_de_webhook(canal))
+    except Exception as e:
+        log.info("Criar instância %s: %s", nome, e)
+    await repo.patch_canal_config(canal["id"], "status", "scanning")
+    return await _buscar_qr(canal)
+
+
 @app.post("/api/canais/{canal_id}/whatsapp/conectar")
 async def connect_whatsapp(canal_id: int):
     canal = await repo.obter_canal(canal_id)
     if not canal or canal["tipo"] != "whatsapp":
         raise HTTPException(404, "Canal de WhatsApp não encontrado.")
-    cfg = canal["config"]
-    if not cfg.get("server_url") or not cfg.get("apikey"):
-        raise HTTPException(400, "Defina a URL do servidor Evolution e a API key first.")
-    try:
-        await evolution.criar_instancia(
-            cfg["server_url"], cfg["apikey"], cfg["instance_name"], _url_de_webhook(canal)
-        )
-    except Exception as e:
-        raise HTTPException(400, f"Falha ao criar instância: {e}")
-    qr = await _buscar_qr(canal)
+    qr = await _conectar_whatsapp(canal)
     return {"ok": True, "status": "scanning", "qr": qr}
 
 
 async def _buscar_qr(canal: dict) -> str:
     cfg = canal["config"]
+    url, key = _evo_creds()
     try:
         data = await evolution.obter_qrcode(
-            cfg["server_url"], cfg["apikey"], cfg["instance_name"]
+            url, key, cfg["instance_name"]
         )
         qr = data.get("base64") or (data.get("code") or "").replace("data:image/png;base64,", "")
     except Exception:
@@ -412,10 +454,10 @@ async def disconnect_whatsapp(canal_id: int):
     canal = await repo.obter_canal(canal_id)
     if not canal or canal["tipo"] != "whatsapp":
         raise HTTPException(404, "Canal de WhatsApp não encontrado.")
-    cfg = canal["config"]
-    if cfg.get("server_url") and cfg.get("apikey"):
+    if settings.has_evolution:
+        url, key = _evo_creds()
         try:
-            await evolution.desconectar(cfg["server_url"], cfg["apikey"], cfg["instance_name"])
+            await evolution.desconectar(url, key, canal["config"].get("instance_name", ""))
         except Exception as e:
             log.warning("Falha ao desconectar instância: %s", e)
     await repo.patch_canal_config(canal_id, "status", "")
@@ -434,7 +476,8 @@ async def testar_canal(canal_id: int):
             info = await telegram.info_bot(cfg.get("token", ""))
             return {"ok": True, "info": f"@{(info or {}).get('username', '?')}"}
         if canal["tipo"] == "whatsapp":
-            st = await evolution.status_instancia(cfg["server_url"], cfg["apikey"], cfg["instance_name"])
+            url, key = _evo_creds()
+            st = await evolution.status_instancia(url, key, cfg.get("instance_name", ""))
             return {"ok": True, "info": st.get("instance", {}).get("state", "")}
         if canal["tipo"] == "instagram":
             await instagram.obter_cliente(
