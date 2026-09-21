@@ -443,7 +443,8 @@ function camposPorTipo(tipo, config = {}, novo = false) {
       <div><label>Senha (opcional se usar sessionid)</label><input type="password" data-config="senha" value="${val(config.senha)}" placeholder="${novo ? "" : "deixe em branco para manter"}"></div>
     </div>
     <label>sessionid (opcional — use quando o login por senha for bloqueado)</label>
-    <input type="password" data-config="sessionid" value="${val(config.sessionid)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
+    <input type="password" data-config="sessionid" value="${val(config.sessionid)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:4px">Para obter: entre em instagram.com no navegador → F12 → Application/Storage → Cookies → copie o valor de <code>sessionid</code>.</p>`;
   if (tipo === "webhook") return `<p class="muted">Nenhuma credencial necessária. Uma URL com segredo será gerada automaticamente.</p>`;
   return "";
 }
