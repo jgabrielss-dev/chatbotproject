@@ -24,6 +24,7 @@ INDEX_HTML = RAIZ / "index.html"
 MAX_CANAIS_POR_AGENTE = 5
 
 _poller_task: asyncio.Task | None = None
+_keepalive_task: asyncio.Task | None = None
 
 
 def _gerar_secret() -> str:
@@ -78,15 +79,45 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
         await asyncio.sleep(intervalo)
 
 
+# --------------------------------------------------------------------------
+# Keepalive Evolution (free tier hiberna apos ~15 min sem trafego)
+# --------------------------------------------------------------------------
+
+async def _keepalive_evolution(intervalo: float = 240.0) -> None:
+    log.info("Keepalive Evolution iniciado")
+    while True:
+        try:
+            canais = [c for c in await repo.listar_canais() if c["tipo"] == "whatsapp" and c["ativo"]]
+            vistos: set[str] = set()
+            for canal in canais:
+                cfg = canal["config"]
+                chave = (cfg.get("server_url") or "").rstrip("/")
+                if not chave or chave in vistos:
+                    continue
+                vistos.add(chave)
+                try:
+                    await evolution.status_instancia(
+                        chave, cfg.get("apikey", ""), cfg.get("instance_name", "_")
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("Erro no keepalive Evolution: %s", e)
+        await asyncio.sleep(intervalo)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.has_db:
         await get_pool()
-        global _poller_task
+        global _poller_task, _keepalive_task
         _poller_task = asyncio.create_task(_poller_instagram())
+        _keepalive_task = asyncio.create_task(_keepalive_evolution())
     yield
     if _poller_task:
         _poller_task.cancel()
+    if _keepalive_task:
+        _keepalive_task.cancel()
     await close_pool()
 
 
