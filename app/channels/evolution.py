@@ -60,8 +60,8 @@ async def enviar_mensagem(
     server_url: str, apikey: str, instance_name: str, numero: str, texto: str
 ) -> None:
     url = f"{server_url.rstrip('/')}/message/sendText/{instance_name}"
-    payload = {"number": numero, "textMessage": {"text": texto}}
-    async with httpx.AsyncClient(timeout=20) as client:
+    payload = {"number": numero, "text": texto}
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(url, json=payload, headers={"apikey": apikey})
         resp.raise_for_status()
 
