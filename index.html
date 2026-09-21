@@ -367,7 +367,8 @@ async function renderCanalBody(div, c) {
         if (!qrEl || !stEl) { clearInterval(timers[c.id]); return; }
         stEl.textContent = "Status: " + r.status;
         if (r.qr) {
-          qrEl.innerHTML = `<img src="data:image/png;base64,${r.qr}" alt="QR">`;
+          const img = r.qr.startsWith("data:") ? r.qr : `data:image/png;base64,${r.qr}`;
+          qrEl.innerHTML = `<img src="${img}" alt="QR">`;
           if (!timers[c.id]) timers[c.id] = setInterval(mostrarQR, 3000);
         } else if (r.status === "open") {
           qrEl.innerHTML = '<p class="badge on">Conectado!</p>';

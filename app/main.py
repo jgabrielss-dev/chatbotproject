@@ -158,6 +158,10 @@ async def webhook_telegram(canal_id: int, secret: str, request: Request):
     return JSONResponse({"ok": True})
 
 
+def _qr_strip(v: str | None) -> str:
+    return (v or "").replace("data:image/png;base64,", "")
+
+
 @app.post("/webhook/evolution/{canal_id}")
 async def webhook_evolution(canal_id: int, request: Request):
     payload = await request.json()
@@ -169,7 +173,7 @@ async def webhook_evolution(canal_id: int, request: Request):
     evento = payload.get("event")
 
     if evento == "QRCODE_UPDATED":
-        qr = payload.get("data", {}).get("base64") or payload.get("data", {}).get("code")
+        qr = _qr_strip(payload.get("data", {}).get("base64") or payload.get("data", {}).get("code"))
         if qr:
             await repo.patch_canal_config(canal_id, "qr", qr)
         await repo.patch_canal_config(canal_id, "status", "scanning")
@@ -186,12 +190,13 @@ async def webhook_evolution(canal_id: int, request: Request):
         return JSONResponse({"ok": True})
 
     texto, numero, _ = evolution.extrair_mensagem(payload)
-    if texto and numero and cfg.get("server_url") and cfg.get("apikey"):
+    if texto and numero and settings.has_evolution:
         try:
             resposta = await _tratar_mensagem(canal, f"wa:{numero}", texto)
             if resposta:
+                url, key = _evo_creds()
                 await evolution.enviar_mensagem(
-                    cfg["server_url"], cfg["apikey"], cfg["instance_name"], numero, resposta
+                    url, key, cfg["instance_name"], numero, resposta
                 )
         except Exception as e:
             log.exception("Erro no webhook Evolution (canal %s): %s", canal_id, e)
@@ -427,7 +432,7 @@ async def _buscar_qr(canal: dict) -> str:
         data = await evolution.obter_qrcode(
             url, key, cfg["instance_name"]
         )
-        qr = data.get("base64") or (data.get("code") or "").replace("data:image/png;base64,", "")
+        qr = _qr_strip(data.get("base64") or data.get("code"))
     except Exception:
         qr = ""
     if qr:
