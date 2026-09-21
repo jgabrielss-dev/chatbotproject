@@ -448,10 +448,13 @@ async def get_whatsapp_qr(canal_id: int):
     status = canal["config"].get("status", "")
     if status == "open":
         return {"status": "open", "qr": ""}
-    if not status:
-        qr = await _buscar_qr(canal)
+    qr = await _buscar_qr(canal)
+    if qr:
+        status = "scanning"
+        await repo.patch_canal_config(canal_id, "status", status)
+    else:
         status = canal["config"].get("status", "conectando")
-    return {"status": status, "qr": canal["config"].get("qr", "")}
+    return {"status": status, "qr": qr}
 
 
 @app.post("/api/canais/{canal_id}/whatsapp/desconectar")
