@@ -66,6 +66,40 @@ async def enviar_mensagem(
         resp.raise_for_status()
 
 
+async def listar_mensagens(
+    server_url: str, apikey: str, instance_name: str, limite: int = 50
+) -> list[dict]:
+    """Retorna mensagens RECEBIDAS (fromMe=false) recentes da instância.
+    Cada item: {numero, texto, origem_id, ts, dados} - usado como rede de segurança
+    para nunca perder mensagem cujo webhook caiu (ex.: app dormindo)."""
+    url = f"{server_url.rstrip('/')}/chat/findMessages/{instance_name}"
+    payload = {"take": limite, "orderBy": {"messageTimestamp": "desc"}}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers={"apikey": apikey})
+        resp.raise_for_status()
+        records = (resp.json().get("messages") or {}).get("records") or []
+    saidas = []
+    for rec in records:
+        key = rec.get("key") or {}
+        if key.get("fromMe"):
+            continue
+        msg = rec.get("message") or {}
+        texto = msg.get("conversation") or (msg.get("extendedTextMessage") or {}).get("text")
+        if not texto:
+            continue
+        remote = str(key.get("remoteJid", "")).split("@")[0]
+        saidas.append(
+            {
+                "numero": remote,
+                "texto": texto,
+                "origem_id": str(key.get("id", "") or ""),
+                "ts": float(rec.get("messageTimestamp") or 0),
+                "dados": rec,
+            }
+        )
+    return saidas
+
+
 def extrair_mensagem(payload: dict) -> tuple[str | str | None, str | None, dict | None]:
     """Retorna (texto, remoteJid, dados) de um evento MESSAGES_UPSERT."""
     evento = (payload.get("event") or "").upper().replace(".", "_")

@@ -201,3 +201,87 @@ async def ultimos_trechos(sessao_id: int, limite: int = 6) -> list[str]:
     """Últimas mensagens em texto (para atualização de memória)."""
     hist = await historico_sessao(sessao_id, limite)
     return [f"{'assistente' if m['de_ia'] else 'usuario'}: {m['texto']}" for m in hist]
+
+
+# ---------- Caixa de entrada (inbox durável) ----------
+
+async def salvar_na_caixa(
+    canal_id: int,
+    remetente: str,
+    texto: str,
+    origem: str = "",
+    payload: Any = None,
+    status: str = "pendente",
+    resposta: str | None = None,
+) -> bool:
+    """Persiste uma mensagem recebida. Retorna False se for duplicata (mesmo origem)."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        result = await con.execute(
+            """INSERT INTO caixa_entrada (canal_id, remetente, texto, origem, payload_json, status, resposta)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+               ON CONFLICT (canal_id, origem) WHERE origem <> '' DO NOTHING""",
+            canal_id, remetente, texto, origem, _json(payload or {}), status, resposta,
+        )
+    return "INSERT 0 1" in result
+
+
+async def listar_caixa_para_processar(limite: int = 10) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """SELECT id, canal_id, remetente, texto, origem, payload_json, status,
+                      tentativas, proxima_tentativa, ultimo_erro, criado_em
+               FROM caixa_entrada
+               WHERE status IN ('pendente', 'erro') AND proxima_tentativa <= now()
+               ORDER BY criado_em ASC, id ASC
+               LIMIT $1""",
+            limite,
+        )
+    return [dict(r) for r in rows]
+
+
+async def marcar_caixa_processando(msg_id: int) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            "UPDATE caixa_entrada SET status = 'processando' WHERE id = $1", msg_id
+        )
+
+
+async def concluir_caixa(msg_id: int, status: str, resposta: str | None = None) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            """UPDATE caixa_entrada
+               SET status = $2, resposta = $3, processado_em = now()
+               WHERE id = $1""",
+            msg_id, status, resposta,
+        )
+
+
+async def falhar_caixa(msg_id: int, tentativas: int, proxima_tentativa: Any, ultimo_erro: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            """UPDATE caixa_entrada
+               SET status = 'erro', tentativas = $2, proxima_tentativa = $3, ultimo_erro = $4
+               WHERE id = $1""",
+            msg_id, tentativas, proxima_tentativa, ultimo_erro,
+        )
+
+
+async def resumo_caixa(limite: int = 10) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        counts_row = await con.fetchrow(
+            """SELECT status, count(*) AS total FROM caixa_entrada GROUP BY status"""
+        )
+        recentes = await con.fetch(
+            """SELECT id, canal_id, remetente, texto, origem, status, tentativas,
+                      ultimo_erro, criado_em, processado_em
+               FROM caixa_entrada ORDER BY id DESC LIMIT $1""",
+            limite,
+        )
+    contagem = {str(r["status"]): r["total"] for r in counts_row}
+    return {"contagem": contagem, "recentes": [dict(r) for r in recentes]}

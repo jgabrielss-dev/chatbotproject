@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -22,9 +24,12 @@ log = logging.getLogger("main")
 RAIZ = Path(__file__).resolve().parent.parent
 INDEX_HTML = RAIZ / "index.html"
 MAX_CANAIS_POR_AGENTE = 5
+MAX_TENTATIVAS_INBOX = 8
+INBOX_BACKOFF_BASE_SEG = 5
 
 _poller_task: asyncio.Task | None = None
 _keepalive_task: asyncio.Task | None = None
+_worker_caixa_task: asyncio.Task | None = None
 
 
 def _gerar_secret() -> str:
@@ -67,13 +72,12 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
                 for thread_id, msg_id, texto in novos:
                     try:
                         log.info("Instagram DM de %s (canal %s)", thread_id, canal["id"])
-                        resposta = await _tratar_mensagem(canal, f"ig:{thread_id}", texto)
-                        if resposta:
-                            await instagram.enviar_mensagem(
-                                usuario, senha, sessionid, thread_id, resposta
-                            )
+                        await repo.salvar_na_caixa(
+                            canal["id"], thread_id, texto,
+                            origem=f"ig:{thread_id}:{msg_id}", payload={"msg_id": msg_id},
+                        )
                     except Exception as e:
-                        log.exception("Falha ao responder DM no canal %s: %s", canal["id"], e)
+                        log.exception("Falha ao enfileirar DM no canal %s: %s", canal["id"], e)
         except Exception as e:
             log.exception("Erro no poller Instagram: %s", e)
         await asyncio.sleep(intervalo)
@@ -104,18 +108,141 @@ async def _keepalive_evolution(intervalo: float = 240.0) -> None:
         await asyncio.sleep(intervalo)
 
 
+# --------------------------------------------------------------------------
+# Caixa de entrada durável: o webhook só persiste a mensagem; um worker
+# processa a fila com retry (backoff) para ninguém ficar sem resposta.
+# --------------------------------------------------------------------------
+
+def _prefixo_usuario(canal: dict, remetente: str) -> str:
+    if canal["tipo"] == "telegram":
+        return f"tg:{remetente}"
+    if canal["tipo"] == "whatsapp":
+        return f"wa:{remetente}"
+    if canal["tipo"] == "instagram":
+        return f"ig:{remetente}"
+    return f"web:{remetente}"
+
+
+async def _enviar_resposta(canal: dict, remetente: str, resposta: str) -> None:
+    cfg = canal["config"]
+    if canal["tipo"] == "telegram":
+        await telegram.enviar_mensagem(cfg["token"], remetente, resposta)
+    elif canal["tipo"] == "whatsapp":
+        if settings.has_evolution and cfg.get("instance_name"):
+            url, key = _evo_creds()
+            await evolution.enviar_mensagem(url, key, cfg["instance_name"], remetente, resposta)
+    elif canal["tipo"] == "instagram":
+        usuario, senha = cfg.get("usuario", ""), cfg.get("senha", "")
+        sessionid = cfg.get("sessionid", "")
+        if usuario and (senha or sessionid):
+            await instagram.enviar_mensagem(usuario, senha, sessionid, remetente, resposta)
+
+
+def _proxima_tentativa(tentativas: int) -> datetime:
+    atraso = min(INBOX_BACKOFF_BASE_SEG * (2 ** min(tentativas - 1, 6)), 900)
+    return datetime.now(timezone.utc) + timedelta(seconds=atraso)
+
+
+async def _processar_caixa(limite: int = 8) -> None:
+    for item in await repo.listar_caixa_para_processar(limite):
+        canal = await repo.obter_canal(item["canal_id"])
+        if not canal:
+            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
+                                    _proxima_tentativa(item["tentativas"] + 1),
+                                    "canal não encontrado")
+            continue
+        if canal["tipo"] == "webhook":
+            await repo.concluir_caixa(item["id"], "sem_resposta")
+            continue
+        await repo.marcar_caixa_processando(item["id"])
+        try:
+            resposta = await _tratar_mensagem(
+                canal, _prefixo_usuario(canal, item["remetente"]), item["texto"]
+            )
+        except Exception as e:
+            log.exception("Falha ao gerar resposta (inbox %s): %s", item["id"], e)
+            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
+                                    _proxima_tentativa(item["tentativas"] + 1), str(e))
+            continue
+        if not resposta:
+            await repo.concluir_caixa(item["id"], "sem_resposta")
+            continue
+        try:
+            await _enviar_resposta(canal, item["remetente"], resposta)
+        except Exception as e:
+            log.exception("Falha ao enviar resposta (inbox %s): %s", item["id"], e)
+            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
+                                    _proxima_tentativa(item["tentativas"] + 1), str(e))
+            continue
+        await repo.concluir_caixa(item["id"], "respondido", resposta)
+        log.info("Inbox %s respondida no canal %s (de %s)", item["id"], canal["id"], item["remetente"])
+
+
+async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
+    """Rede de segurança do WhatsApp: se um webhook caiu (app dormindo/hibernação),
+    busca as mensagens recebidas na Evolution e as enfileira para responder depois."""
+    if not settings.has_evolution:
+        return
+    url, key = settings.evolution_api_url, settings.evolution_api_key
+    while True:
+        try:
+            canais = [c for c in await repo.listar_canais() if c["tipo"] == "whatsapp"]
+            for canal in canais:
+                instancia = canal["config"].get("instance_name")
+                if not instancia:
+                    continue
+                marco = float(canal["config"].get("sync_caixa_desde") or 0)
+                try:
+                    novas = await evolution.listar_mensagens(url, key, instancia)
+                except Exception as e:
+                    log.warning("Sincronização Evolution falhou (inst %s): %s", instancia, e)
+                    continue
+                if marco == 0:
+                    await repo.patch_canal_config(canal["id"], "sync_caixa_desde", time.time())
+                    continue
+                maior_ts = marco
+                for msg in novas:
+                    if msg["ts"] > marco:
+                        await repo.salvar_na_caixa(
+                            canal["id"], msg["numero"], msg["texto"],
+                            origem=f"wa:{msg['origem_id']}", payload=msg["dados"],
+                        )
+                        if msg["ts"] > maior_ts:
+                            maior_ts = msg["ts"]
+                if maior_ts > marco:
+                    await repo.patch_canal_config(canal["id"], "sync_caixa_desde", maior_ts)
+        except Exception as e:
+            log.warning("Erro na sincronização Evolution: %s", e)
+        await asyncio.sleep(intervalo)
+
+
+async def _worker_caixa() -> None:
+    log.info("Worker da caixa de entrada iniciado")
+    while True:
+        try:
+            if settings.has_db:
+                await _processar_caixa()
+        except Exception as e:
+            log.exception("Erro no worker da caixa: %s", e)
+        await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.has_db:
         await get_pool()
-        global _poller_task, _keepalive_task
+        global _poller_task, _keepalive_task, _worker_caixa_task
         _poller_task = asyncio.create_task(_poller_instagram())
         _keepalive_task = asyncio.create_task(_keepalive_evolution())
+        _worker_caixa_task = asyncio.create_task(_worker_caixa())
+        asyncio.create_task(_sincronizar_evolution())
     yield
     if _poller_task:
         _poller_task.cancel()
     if _keepalive_task:
         _keepalive_task.cancel()
+    if _worker_caixa_task:
+        _worker_caixa_task.cancel()
     await close_pool()
 
 
@@ -154,12 +281,10 @@ async def webhook_telegram(canal_id: int, secret: str, request: Request):
 
     texto, chat_id = telegram.extrair_mensagem(payload)
     if texto and chat_id:
-        try:
-            resposta = await _tratar_mensagem(canal, f"tg:{chat_id}", texto)
-            if resposta:
-                await telegram.enviar_mensagem(canal["config"]["token"], chat_id, resposta)
-        except Exception as e:
-            log.exception("Erro no webhook Telegram (canal %s): %s", canal_id, e)
+        await repo.salvar_na_caixa(
+            canal_id, chat_id, texto,
+            origem=f"tg:{payload.get('update_id')}", payload=payload,
+        )
     return JSONResponse({"ok": True})
 
 
@@ -200,17 +325,12 @@ async def webhook_evolution(canal_id: int, request: Request):
     if payload.get("instance") and payload["instance"] != cfg.get("instance_name"):
         return JSONResponse({"ok": True})
 
-    texto, numero, _ = evolution.extrair_mensagem(payload)
-    if texto and numero and settings.has_evolution:
-        try:
-            resposta = await _tratar_mensagem(canal, f"wa:{numero}", texto)
-            if resposta:
-                url, key = _evo_creds()
-                await evolution.enviar_mensagem(
-                    url, key, cfg["instance_name"], numero, resposta
-                )
-        except Exception as e:
-            log.exception("Erro no webhook Evolution (canal %s): %s", canal_id, e)
+    texto, numero, dados = evolution.extrair_mensagem(payload)
+    if texto and numero:
+        key_id = (dados.get("key") or {}).get("id") or ""
+        await repo.salvar_na_caixa(
+            canal_id, numero, texto, origem=f"wa:{key_id}", payload=dados,
+        )
     return JSONResponse({"ok": True})
 
 
@@ -227,6 +347,10 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
     usuario = str(payload.get("user", "anonimo") or "anonimo")
     if texto:
         resposta = await _tratar_mensagem(canal, f"web:{usuario}", texto)
+        await repo.salvar_na_caixa(
+            canal_id, usuario, texto, origem="",
+            payload=payload, status="respondido", resposta=resposta or "",
+        )
         return JSONResponse({"reply": resposta or ""})
     return JSONResponse({"reply": ""})
 
@@ -466,6 +590,13 @@ async def get_whatsapp_qr(canal_id: int):
     else:
         status = canal["config"].get("status", "conectando")
     return {"status": status, "qr": qr}
+
+
+@app.get("/api/caixa")
+async def get_caixa():
+    if not settings.has_db:
+        raise HTTPException(503, "Banco de dados não configurado.")
+    return await repo.resumo_caixa()
 
 
 @app.post("/api/canais/{canal_id}/whatsapp/desconectar")
