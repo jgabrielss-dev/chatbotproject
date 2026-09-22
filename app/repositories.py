@@ -274,7 +274,7 @@ async def falhar_caixa(msg_id: int, tentativas: int, proxima_tentativa: Any, ult
 async def resumo_caixa(limite: int = 10) -> dict:
     pool = await get_pool()
     async with pool.acquire() as con:
-        counts_row = await con.fetchrow(
+        counts_rows = await con.fetch(
             """SELECT status, count(*) AS total FROM caixa_entrada GROUP BY status"""
         )
         recentes = await con.fetch(
@@ -283,5 +283,5 @@ async def resumo_caixa(limite: int = 10) -> dict:
                FROM caixa_entrada ORDER BY id DESC LIMIT $1""",
             limite,
         )
-    contagem = {str(r["status"]): r["total"] for r in counts_row}
+    contagem = {str(r["status"]): r["total"] for r in counts_rows}
     return {"contagem": contagem, "recentes": [dict(r) for r in recentes]}
