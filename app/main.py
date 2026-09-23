@@ -144,6 +144,7 @@ def _proxima_tentativa(tentativas: int) -> datetime:
 
 
 async def _processar_caixa(limite: int = 8) -> None:
+    await repo.reenfileirar_processando()
     for item in await repo.listar_caixa_para_processar(limite):
         canal = await repo.obter_canal(item["canal_id"])
         if not canal:
@@ -496,13 +497,20 @@ async def delete_canal(canal_id: int):
 
 def _url_de_webhook(canal: dict) -> str:
     base = settings.base_url
-    if not base:
-        raise HTTPException(400, "Configure a variável BASE_URL no .env para gerar webhooks.")
+    inbox = settings.supabase_functions_base
     if canal["tipo"] == "telegram":
+        if inbox:
+            return f"{inbox}/telegram/{canal['id']}/{canal['config'].get('secret')}"
+        if not base:
+            raise HTTPException(400, "Configure a variável BASE_URL (ou SUPABASE_FUNCTIONS_BASE) no .env para gerar webhooks.")
         return f"{base}/webhook/telegram/{canal['id']}/{canal['config'].get('secret')}"
     if canal["tipo"] == "whatsapp":
+        if inbox:
+            return f"{inbox}/evolution/{canal['id']}"
         return f"{base}/webhook/evolution/{canal['id']}"
     if canal["tipo"] == "webhook":
+        if not base:
+            raise HTTPException(400, "Configure a variável BASE_URL no .env para gerar webhooks.")
         return f"{base}/webhook/generico/{canal['id']}/{canal['config'].get('secret')}"
     return ""
 

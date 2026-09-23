@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS caixa_entrada (
   processado_em TIMESTAMPTZ
 );
 
--- Evita duplicatas quando o mesmo evento chega duas vezes (ex.: retry do Telegram)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_caixa_origem ON caixa_entrada (canal_id, origem) WHERE origem <> '';
+-- Evita duplicatas quando o mesmo evento chega duas vezes (ex.: retry do Telegram).
+-- Índice NÃO parcial: o PostgREST (upsert da edge function) não casa ON CONFLICT
+-- com índice parcial, pois não consegue provar o predicado.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_caixa_origem ON caixa_entrada (canal_id, origem);
 CREATE INDEX IF NOT EXISTS idx_caixa_fila ON caixa_entrada (status, proxima_tentativa);
 CREATE INDEX IF NOT EXISTS idx_caixa_canal ON caixa_entrada (canal_id, criado_em);

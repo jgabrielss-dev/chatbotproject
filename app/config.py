@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -33,6 +34,17 @@ class Settings:
     @property
     def has_db(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def supabase_functions_base(self) -> str:
+        """Base das Edge Functions (fila sempre ativa) derivada do projeto
+        Supabase, usado como webhook público do Telegram/Evolution.
+        O app do Render pode dormir à vontade: quem grava na caixa é a função."""
+        v = os.getenv("SUPABASE_FUNCTIONS_BASE", "").rstrip("/")
+        if v:
+            return v
+        m = re.search(r"postgres\.([a-z0-9]+)\b", self.database_url or "")
+        return f"https://{m.group(1)}.supabase.co/functions/v1/inbox" if m else ""
 
 
 settings = Settings()

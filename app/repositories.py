@@ -249,6 +249,21 @@ async def marcar_caixa_processando(msg_id: int) -> None:
         )
 
 
+async def reenfileirar_processando(tolerancia_segundos: int = 600) -> None:
+    """Devolve à fila mensagens presas em 'processando' (ex.: o app foi
+    dormido/morto no meio do processamento). Evita mensagem perdida."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            """UPDATE caixa_entrada
+               SET status = 'pendente', tentativas = tentativas + 1,
+                   proxima_tentativa = now()
+               WHERE status = 'processando'
+                 AND criado_em < now() - ($1 * interval '1 second')""",
+            tolerancia_segundos,
+        )
+
+
 async def concluir_caixa(msg_id: int, status: str, resposta: str | None = None) -> None:
     pool = await get_pool()
     async with pool.acquire() as con:
