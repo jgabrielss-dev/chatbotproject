@@ -39,3 +39,13 @@ CREATE TABLE IF NOT EXISTS instagram_sessoes (
 -- Sem isto, os cookies de sessao do Instagram ficariam legiveis via PostgREST
 -- com a anon key publica do projeto.
 ALTER TABLE instagram_sessoes ENABLE ROW LEVEL SECURITY;
+
+-- Grants do schema public: um schema recriado (restauracao de banco) perde os
+-- grants que o Supabase instala, e a edge function falha com
+-- "permission denied for schema public".
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
