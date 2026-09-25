@@ -8,7 +8,8 @@
 //
 // Rotas (POST):
 //   /functions/v1/inbox/telegram/{canal_id}/{secret}
-//   /functions/v1/inbox/evolution/{canal_id}
+//   /functions/v1/inbox/evolution/{canal_id}/{secret}
+//   /functions/v1/inbox/cron                        (disparada pelo pg_cron do banco)
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -34,27 +35,34 @@ function json(body: Record<string, unknown>, status = 200) {
   });
 }
 
-// Dispara (sem travar) o wake. O EdgeRuntime.waitUntil segura o fetch
-// depois que a resposta já foi devolvida para o Telegram/Evolution.
-function wake() {
-  const targets: Promise<unknown>[] = [];
-  if (RENDER_HEALTH_URL) {
-    targets.push(
-      fetch(RENDER_HEALTH_URL, { signal: AbortSignal.timeout(60_000) }).catch(() => {}),
-    );
+// Comparação em tempo constante: não vaza o segredo por diferença de tempo.
+function segredoIgual(a: unknown, b: unknown): boolean {
+  const x = String(a ?? "");
+  const y = String(b ?? "");
+  const n = Math.max(x.length, y.length);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < n; i++) {
+    diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
   }
-  if (EVOLUTION_URL) {
-    targets.push(
-      fetch(EVOLUTION_URL, { signal: AbortSignal.timeout(60_000) }).catch(() => {}),
-    );
-  }
-  const p = Promise.allSettled(targets);
+  return diff === 0;
+}
+
+// Dispara (sem travar) o wake de um alvo. O EdgeRuntime.waitUntil segura o
+// fetch depois que a resposta já foi devolvida para o Telegram/Evolution.
+function wakeTarget(url: string) {
+  if (!url) return;
+  const p = fetch(url, { signal: AbortSignal.timeout(60_000) }).catch(() => {});
   const edge: any = (globalThis as any).EdgeRuntime;
   if (edge?.waitUntil) {
     try { edge.waitUntil(p); } catch { /* noop */ }
   } else {
     p.catch(() => {});
   }
+}
+
+function wake() {
+  wakeTarget(RENDER_HEALTH_URL);
+  wakeTarget(EVOLUTION_URL);
 }
 
 async function patchConfig(
@@ -80,7 +88,7 @@ async function handleTelegram(canalId: string, secret: string, payload: any) {
   const { data: canal, error } = await supabase
     .from("canais").select("id, tipo, config").eq("id", canalId).maybeSingle();
   if (error) return json({ ok: false }, 500);
-  if (!canal || canal.tipo !== "telegram" || canal.config?.secret !== secret) {
+  if (!canal || canal.tipo !== "telegram" || !segredoIgual(canal.config?.secret, secret)) {
     return json({ ok: false }, 404);
   }
   const msg = payload?.message ?? {};
@@ -103,11 +111,14 @@ async function handleTelegram(canalId: string, secret: string, payload: any) {
   return json({ ok: true });
 }
 
-async function handleEvolution(canalId: string, payload: any) {
+async function handleEvolution(canalId: string, secret: string, payload: any) {
   const { data: canal, error } = await supabase
     .from("canais").select("id, tipo, config").eq("id", canalId).maybeSingle();
   if (error) return json({ ok: false }, 500);
   if (!canal || canal.tipo !== "whatsapp") return json({ ok: false }, 404);
+  // O segredo na URL fecha o endpoint: sem ele, qualquer um que adivinhasse o
+  // id do canal (sequencial) injetaria mensagens e gastaria cota do Gemini.
+  if (!segredoIgual(canal.config?.secret, secret)) return json({ ok: false }, 404);
 
   const cfg = (canal.config ?? {}) as Record<string, any>;
   const instanciaEvento = payload?.instance;
@@ -177,8 +188,15 @@ Deno.serve(async (req) => {
     if (rest[0] === "telegram" && rest[1] && rest[2]) {
       return await handleTelegram(rest[1], rest[2], payload);
     }
-    if (rest[0] === "evolution" && rest[1]) {
-      return await handleEvolution(rest[1], payload);
+    if (rest[0] === "evolution" && rest[1] && rest[2]) {
+      return await handleEvolution(rest[1], rest[2], payload);
+    }
+    // Rota usada pelo pg_cron do banco (despertador periódico): acorda
+    // SOMENTE a Evolution (a sessão Baileys reconecta e o WhatsApp entrega
+    // o backlog de mensagens dormidas). NÃO desperta o app (economiza horas).
+    if (rest[0] === "cron") {
+      wakeTarget(EVOLUTION_URL);
+      return json({ ok: true });
     }
     return json({ ok: false, error: "rota inválida", path: url.pathname }, 404);
   } catch (e) {

@@ -3,6 +3,32 @@ from __future__ import annotations
 import httpx
 
 
+WEBHOOK_EVENTOS = ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE"]
+
+
+def _webhook(url: str) -> dict:
+    """Formato de /instance/create."""
+    return {
+        "enabled": True,
+        "url": url,
+        "byEvents": False,
+        "base64": False,
+        "events": WEBHOOK_EVENTOS,
+    }
+
+
+def _webhook_set(url: str) -> dict:
+    """Formato de /webhook/set: as chaves de byEvents/base64 ganham o prefixo
+    'webhook' (verificado na Evolution v2.3.7)."""
+    return {
+        "enabled": True,
+        "url": url,
+        "webhookByEvents": False,
+        "webhookBase64": False,
+        "events": WEBHOOK_EVENTOS,
+    }
+
+
 async def criar_instancia(
     server_url: str, apikey: str, instance_name: str, webhook_url: str
 ) -> dict:
@@ -12,16 +38,37 @@ async def criar_instancia(
         "instanceName": instance_name,
         "qrcode": True,
         "integration": "WHATSAPP-BAILEYS",
-        "webhook": {
-            "enabled": True,
-            "url": webhook_url,
-            "byEvents": False,
-            "base64": False,
-            "events": ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE"],
-        },
+        "webhook": _webhook(webhook_url),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(url, json=payload, headers={"apikey": apikey})
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def atualizar_webhook(
+    server_url: str, apikey: str, instance_name: str, webhook_url: str
+) -> dict:
+    """Reaponta o webhook de uma instância que já existe (Evolution v2).
+
+    Necessário porque a URL agora carrega o segredo do canal: uma instância
+    criada antes disso continua chamando a URL antiga (sem segredo) e seria
+    rejeitada. `criar_instancia` não serve aqui: ela falha em instância
+    existente e o erro era engolido.
+    """
+    url = f"{server_url.rstrip('/')}/webhook/set/{instance_name}"
+    payload = {"instance": instance_name, "webhook": _webhook_set(webhook_url)}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers={"apikey": apikey})
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def obter_webhook(server_url: str, apikey: str, instance_name: str) -> dict:
+    """Configuração de webhook registrada na Evolution (para conferência)."""
+    url = f"{server_url.rstrip('/')}/webhook/find/{instance_name}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers={"apikey": apikey})
         resp.raise_for_status()
         return resp.json()
 

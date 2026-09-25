@@ -92,10 +92,50 @@
     aside { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
     .grid-2 { grid-template-columns: 1fr; }
   }
+
+  /* ---- fila / problemas ---- */
+  .saude { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saude .badge { font-size: 12px; }
+  .problemas { margin-top: 12px; border-top: 1px solid var(--border); }
+  .prob {
+    display: flex; align-items: center; gap: 8px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px; flex-wrap: wrap;
+  }
+  .prob:last-child { border-bottom: none; }
+  .prob .txt { flex: 1; min-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .prob .erro {
+    display: none; width: 100%; margin-top: 6px; padding: 8px 10px;
+    background: #12141c; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); font-size: 11px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+  }
+  .prob.aberta .erro { display: block; }
+  .btn.tiny { padding: 2px 7px; font-size: 11px; }
+  .vazio { color: var(--muted); font-size: 12px; padding: 10px 0; }
+
+  /* ---- portao de acesso ---- */
+  #gate {
+    position: fixed; inset: 0; background: var(--bg); z-index: 1000;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #gate .box { width: 100%; max-width: 360px; }
 </style>
 </head>
 <body>
 <div id="toasts"></div>
+
+<div id="gate" class="hidden">
+  <div class="box card">
+    <h2>Acesso ao painel</h2>
+    <p class="muted">Informe o <code>ADMIN_TOKEN</code> configurado no servidor.</p>
+    <input type="password" id="gateToken" placeholder="ADMIN_TOKEN" autocomplete="current-password">
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="gateEntrar">Entrar</button>
+      <button class="btn" id="gateSair">Trocar token</button>
+    </div>
+    <p class="aviso" id="gateErro" style="margin-top:10px"></p>
+  </div>
+</div>
 
 <aside>
   <h1>Chatbot Project</h1>
@@ -106,6 +146,17 @@
 </aside>
 
 <main>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Fila de mensagens</h2>
+      <div class="row">
+        <span class="saude" id="filaResumo">carregando…</span>
+        <button class="btn sm" id="btnAtualizarFila">Atualizar</button>
+      </div>
+    </div>
+    <div id="filaProblemas" class="problemas"></div>
+  </div>
+
   <div id="agenteForm" class="card hidden">
     <h2 id="formTitle">Novo agente</h2>
     <label>Nome</label>
@@ -173,8 +224,49 @@ const API_BASE = /\.github\.io$/i.test(location.hostname)
   ? "https://chatbotproject-1-l9zr.onrender.com"
   : "";
 
+// ---- acesso ao painel -------------------------------------------------
+// Toda rota /api/* exige o header X-Admin-Token. Sem ele, o servidor devolve
+// 401 e o painel nem chega a listar agentes (antes, qualquer pessoa na internet
+// lia o token do bot de Telegram em /api/agentes/{id}/canais).
+const CHAVE_TOKEN = "chatbotproject.adminToken";
+let adminToken = localStorage.getItem(CHAVE_TOKEN) || "";
+
+const gate = $("gate"), gateToken = $("gateToken"), gateErro = $("gateErro");
+
+function mostrarGate(erro) {
+  gate.classList.remove("hidden");
+  gateErro.textContent = erro || "";
+  gateErro.style.color = erro ? "var(--danger)" : "";
+  gateToken.value = adminToken;
+  setTimeout(() => gateToken.focus(), 0);
+}
+
+function esconderGate() { gate.classList.add("hidden"); }
+
+$("gateEntrar").onclick = () => {
+  adminToken = gateToken.value.trim();
+  if (!adminToken) { gateErro.textContent = "Informe o token."; return; }
+  localStorage.setItem(CHAVE_TOKEN, adminToken);
+  esconderGate();
+  carregarAgentes();
+  atualizarFila();
+};
+$("gateSair").onclick = () => {
+  localStorage.removeItem(CHAVE_TOKEN);
+  adminToken = "";
+  mostrarGate();
+};
+gateToken.addEventListener("keydown", (e) => { if (e.key === "Enter") $("gateEntrar").click(); });
+
 const api = async (url, opts = {}) => {
-  const r = await fetch(API_BASE + url, { headers: { "Content-Type": "application/json" }, ...opts });
+  const r = await fetch(API_BASE + url, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "X-Admin-Token": adminToken, ...(opts.headers || {}) },
+  });
+  if (r.status === 401) {
+    mostrarGate("Token inválido ou ausente. Cole o ADMIN_TOKEN do servidor.");
+    throw new Error("não autorizado");
+  }
   if (!r.ok) {
     let msg = r.statusText;
     try { const j = await r.json(); msg = j.detail || JSON.stringify(j); } catch (e) { try { msg = await r.text(); } catch (e2) {} }
@@ -426,6 +518,83 @@ async function testar(canalId, btn) {
   btn.disabled = false; btn.textContent = o;
 }
 
+/* ---------------- Fila de mensagens ---------------- */
+// Visão limpa por padrão: só os contadores. A mensagem que está presa aparece
+// como uma linha curta e o erro cru (stack do Gemini, erro da Evolution) só
+// aparece quando o usuário clica em "detalhes".
+const ROTULO_STATUS = {
+  pendente: ["na fila", "tipo"],
+  processando: ["processando", "on"],
+  erro: ["com erro", "err"],
+  respondido: ["respondidas", "on"],
+  sem_resposta: ["sem resposta", "off"],
+};
+
+function quando(iso) {
+  if (!iso) return "";
+  const seg = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seg < 60) return "agora";
+  if (seg < 3600) return Math.round(seg / 60) + "min";
+  if (seg < 86400) return Math.round(seg / 3600) + "h";
+  return Math.round(seg / 86400) + "d";
+}
+
+function renderFila(dados) {
+  const c = dados.contagem || {};
+  const partes = [];
+  for (const [chave, rot] of Object.entries(ROTULO_STATUS)) {
+    if (!c[chave]) continue;
+    const [texto, cor] = rot;
+    partes.push(`<span class="badge ${cor}">${c[chave]} ${texto}</span>`);
+  }
+  $("filaResumo").innerHTML = partes.join("") || '<span class="badge on">fila vazia</span>';
+
+  const problemas = dados.problemas || [];
+  const el = $("filaProblemas");
+  el.innerHTML = "";
+  if (!problemas.length) {
+    el.innerHTML = '<p class="vazio">Nada pendente. Todas as mensagens recebidas foram respondidas.</p>';
+    return;
+  }
+  for (const p of problemas) {
+    const [texto, cor] = ROTULO_STATUS[p.status] || [p.status, ""];
+    const div = document.createElement("div");
+    div.className = "prob";
+    const orig = p.origem || "";
+    div.innerHTML = `
+      <span class="badge ${cor}">${esc(texto)}</span>
+      <span class="txt">${esc(p.canal_nome || p.canal_id)} &middot; ${esc(p.remetente || "")}</span>
+      ${p.tentativas > 1 ? `<span class="badge">${p.tentativas}x</span>` : ""}
+      <span class="badge">${esc(quando(p.proxima_tentativa || p.criado_em))}</span>
+      ${p.ultimo_erro ? '<button class="btn sm tiny" data-detalhe>detalhes</button>' : ""}
+      <div class="erro"></div>`;
+    const btn = div.querySelector("[data-detalhe]");
+    if (btn) {
+      const bruto = div.querySelector(".erro");
+      bruto.textContent = p.ultimo_erro;
+      btn.onclick = () => {
+        const aberta = div.classList.toggle("aberta");
+        bruto.style.display = aberta ? "block" : "none";
+        btn.textContent = aberta ? "ocultar" : "detalhes";
+      };
+    }
+    el.appendChild(div);
+  }
+}
+
+let timerFila = null;
+async function atualizarFila() {
+  try {
+    renderFila(await api("/api/caixa"));
+  } catch (e) {
+    if (e.message !== "não autorizado") {
+      $("filaResumo").innerHTML = '<span class="badge err">fila indisponível</span>';
+    }
+  }
+}
+
+$("btnAtualizarFila").onclick = atualizarFila;
+
 /* ---------------- Formulários de canal ---------------- */
 
 function camposPorTipo(tipo, config = {}, novo = false) {
@@ -525,7 +694,15 @@ $("btnNovoCanal").onclick = () => {
   mostrarFormNovoCanal();
 };
 
-carregarAgentes();
+// ---------- partida ----------
+if (adminToken) {
+  esconderGate();
+  carregarAgentes().catch(() => {});
+  atualizarFila();
+  timerFila = setInterval(atualizarFila, 15000);
+} else {
+  mostrarGate();
+}
 </script>
 </body>
 </html>

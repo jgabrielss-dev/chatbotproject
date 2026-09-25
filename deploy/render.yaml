@@ -11,3 +11,6 @@ services:
         sync: false
       - key: BASE_URL
         sync: false
+      # Sem este token todas as rotas /api/* ficam fechadas (503).
+      - key: ADMIN_TOKEN
+        sync: false

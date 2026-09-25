@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -88,19 +89,24 @@ def _gerar(conteudo: str | list[types.Content], instrucao: str | None = None) ->
     raise erro if erro else RuntimeError("Nenhum modelo Gemini disponivel.")
 
 
-def responder(
+async def responder(
     system_prompt: str,
     historico: list[dict],
     mensagem: str,
     memoria: dict | None = None,
 ) -> str:
-    """Envia para o Gemini: system prompt + memória + histórico + nova mensagem."""
+    """Envia para o Gemini: system prompt + memória + histórico + nova mensagem.
+
+    A biblioteca google-genai é síncrona e pode demorar 45s. Rodar isso direto no
+    event loop congelaria o servidor inteiro (webhooks, worker da fila, keepalive)
+    durante cada chamada, então tudo aqui vai para uma thread.
+    """
     instrucao = _contexto_prompt(system_prompt, memoria or {}) or None
     conteudo = [*_montar_historico(historico), types.Part(text=mensagem)]
-    return _gerar(conteudo, instrucao)
+    return await asyncio.to_thread(_gerar, conteudo, instrucao)
 
 
-def atualizar_memoria(
+async def atualizar_memoria(
     system_prompt: str,
     memoria: dict,
     trechos: list[str],
@@ -108,6 +114,10 @@ def atualizar_memoria(
     """Pede ao Gemini para extrair/atualizar a memória JSONB da sessão."""
     if not settings.has_gemini:
         return memoria
+    return await asyncio.to_thread(_atualizar_memoria_sync, memoria, trechos)
+
+
+def _atualizar_memoria_sync(memoria: dict, trechos: list[str]) -> dict:
     prompt = _PROMPT_MEMORIA.format(
         memoria=json.dumps(memoria, ensure_ascii=False, indent=2) or "{}",
         mensagens="\n".join(trechos) or "(nenhuma)",
