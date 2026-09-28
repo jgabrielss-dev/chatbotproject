@@ -1,4 +1,4 @@
-"""Testes dos canais: validacao de credenciais, redaction e tarefas de fundo.
+﻿"""Testes dos canais: validacao de credenciais, redaction e tarefas de fundo.
 
 Roda sem banco e sem rede:
 
@@ -12,7 +12,8 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from app import repositories as repo  # noqa: E402
 from app.channels import meta_oficial  # noqa: E402
@@ -193,8 +194,28 @@ async def _tarefas() -> None:
 asyncio.run(_tarefas())
 
 # --------------------------------------------------------------------------
+print("\n== painel: o form de Instagram nao pede mais usuario/senha ==")
+html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+# O login por senha foi desativado pelo Instagram. Se sobrar referencia a
+# usuario/senha na validacao do botao "Criar canal", o usuario fica preso
+# preenchendo um campo que nem existe mais na tela.
+for obsoleto in ("config.usuario", "config.senha", 'data-config="usuario"', 'data-config="senha"'):
+    check(f"sem referencia a '{obsoleto}'", obsoleto not in html)
+
+check("validacao do Instagram exige sessionid",
+      'tipo === "instagram" && !config.sessionid' in html)
+bloco = html[html.index('if (tipo === "instagram") return `') + 30:]
+bloco = bloco[:bloco.index("`;")]
+check("formulario do Instagram so tem o campo sessionid",
+      'data-config="sessionid"' in bloco and "data-config=" not in bloco.replace(
+          'data-config="sessionid"', ""),
+      bloco.strip()[:80])
+
+# --------------------------------------------------------------------------
 print("\n== resumo ==")
 if falhas:
     print(f"FALHAS ({len(falhas)}): " + ", ".join(falhas))
     sys.exit(1)
 print("TODOS OS TESTES PASSARAM")
+

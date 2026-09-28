@@ -584,7 +584,15 @@ function mostrarFormNovoCanal() {
     if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
     const config = coletarConfig(cont);
     if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
-    if (tipo === "instagram" && (!config.usuario || (!config.senha && !config.sessionid))) { toast("Informe usuário e senha (ou sessionid) do Instagram.", "err"); return; }
+    // Instagram não-oficial é sessionid-only: o login por senha foi desativado
+    // pelo próprio Instagram, então usuário/senha não são campos, e sim erro.
+    if (tipo === "instagram" && !config.sessionid) { toast("Informe o sessionid do Instagram.", "err"); return; }
+    if (tipo === "instagram_oficial" && (!config.ig_user_id || !config.access_token || !config.verify_token || !config.app_secret)) {
+      toast("Informe ig_user_id, access_token, verify_token e app_secret.", "err"); return;
+    }
+    if (tipo === "whatsapp_oficial" && (!config.phone_number_id || !config.access_token || !config.verify_token || !config.app_secret)) {
+      toast("Informe phone_number_id, access_token, verify_token e app_secret.", "err"); return;
+    }
     btn.disabled = true;
     try {
       await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
