@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import repositories as repo
-from app.channels import evolution, instagram, telegram
+from app.channels import evolution, instagram, meta_oficial, telegram
 from app.config import settings
 from app.database import close_pool, get_pool
 from app.pipeline import processar_mensagem
@@ -27,9 +27,164 @@ MAX_CANAIS_POR_AGENTE = 5
 MAX_TENTATIVAS_INBOX = 8
 INBOX_BACKOFF_BASE_SEG = 5
 
+# Canais OFICIAIS (webhook direto da Meta, sem polling e sem keepalive: o Render
+# pode hibernar) versus NÃO OFICIAIS (Evolution/Baileys e instagrapi, que
+# precisam de processo vivo e podem banir a conta).
+TIPOS_CANAL = (
+    "telegram",
+    "whatsapp_oficial",
+    "instagram_oficial",
+    "webhook",
+    "whatsapp",
+    "instagram",
+)
+TIPOS_CANAL_OFICIAL = ("whatsapp_oficial", "instagram_oficial")
+AVISO_CANAL_NAO_OFICIAL = {
+    "whatsapp": (
+        "Integração NÃO OFICIAL (Evolution API / Baileys). Não é homologada pela "
+        "Meta, usa QR e pode desconectar a qualquer momento, e o Render precisa "
+        "ficar acordado (keepalive) para não perder mensagens — o que consome as "
+        "horas do plano grátis. Para produção e estabilidade, prefira "
+        "'WhatsApp (oficial - Cloud API)'."
+    ),
+    "instagram": (
+        "Integração NÃO OFICIAL (instagrapi, API privada). Viola os Termos de Uso "
+        "do Instagram e pode BANIR a conta; os endpoints privados mudam sem aviso. "
+        "Ativa apenas por 'sessionid' e a sessão expira. Para produção, prefira "
+        "'Instagram (oficial - Messaging API)'."
+    ),
+}
+
+
+def _publico(canal: dict | None) -> dict | None:
+    """Redige os segredos do canal antes de devolver na API."""
+    return repo._sem_secrets(canal) if canal else canal
+
+
+async def _exigir_identificador_unico(
+    tipo: str, config: dict, *, ignorar_canal_id: int | None = None
+) -> None:
+    """Impede dois canais oficiais com o mesmo id de conta da Meta.
+
+    O roteamento do webhook (na Edge Function) resolve o canal pelo
+    phone_number_id / ig_user_id. Com o mesmo id em dois canais, o roteamento
+    fica ambíguo e a assinatura X-Hub-Signature-256 é conferida contra o
+    app_secret do canal errado — todas as mensagens seriam rejeitadas.
+    """
+    if tipo not in TIPOS_CANAL_OFICIAL:
+        return
+    campo = "ig_user_id" if tipo == "instagram_oficial" else "phone_number_id"
+    identificador = str(config.get(campo) or "").strip()
+    if not identificador:
+        return
+
+    for canal in await repo.listar_canais():
+        if canal["id"] == ignorar_canal_id or canal["tipo"] != tipo:
+            continue
+        if str((canal.get("config") or {}).get(campo) or "").strip() == identificador:
+            raise HTTPException(
+                409,
+                f"Este {campo} ({identificador}) já está em uso pelo canal "
+                f"\"{canal['nome']}\". Cada conta da Meta deve ter um único canal, "
+                "senão o webhook não consegue decidir para quem é a mensagem.",
+            )
+
+    # O verify_token precisa ser único entre canais, porque é por ele que o
+    # handshake de verificação (GET) acha o canal — o Meta não manda o id ainda.
+    token = str(config.get("verify_token") or "").strip()
+    if token:
+        for canal in await repo.listar_canais():
+            if canal["id"] == ignorar_canal_id:
+                continue
+            if canal["tipo"] in TIPOS_CANAL_OFICIAL and \
+                    str((canal.get("config") or {}).get("verify_token") or "").strip() == token:
+                raise HTTPException(
+                    409,
+                    f"Este verify_token já é usado pelo canal \"{canal['nome']}\". "
+                    "Use um valor diferente em cada canal oficial.",
+                )
+
+
+def _url_webhook_meta(tipo: str) -> str:
+    """URL pública que o Meta deve chamar. Não contém segredo: o roteamento é
+    feito pelo phone_number_id / ig_user_id que vem no próprio evento."""
+    familia = "whatsapp" if tipo == "whatsapp_oficial" else "instagram"
+    base = settings.supabase_functions_base
+    return f"{base}/meta/{familia}" if base else f"(configure SUPABASE_FUNCTIONS_BASE) /meta/{familia}"
+
+
+def _validar_config_canal(tipo: str, config: dict, *, agent_id: int = 0) -> dict:
+    """Valida e normaliza a config conforme o tipo do canal.
+
+    Garante que cada canal só guarde as credenciais que realmente usa — é o que
+    separa de fato a integração oficial da não oficial.
+    """
+    config = {k: v for k, v in (config or {}).items() if v not in ("", None)}
+
+    if tipo == "instagram":
+        # Só sessionid: o login por senha foi bloqueado pelo Instagram.
+        sessionid = str(config.get("sessionid") or "")
+        if not sessionid:
+            raise HTTPException(
+                400,
+                "Instagram não-oficial exige o campo 'sessionid'. Extraia o cookie "
+                "'sessionid' de instagram.com com o navegador já logado "
+                "(F12 > Application/Storage > Cookies > sessionid).",
+            )
+        return {"sessionid": sessionid, "ig_vistos": config.get("ig_vistos") or {}}
+
+    if tipo == "instagram_oficial":
+        faltando = [c for c in ("ig_user_id", "access_token", "verify_token", "app_secret")
+                    if not str(config.get(c) or "").strip()]
+        if faltando:
+            raise HTTPException(
+                400,
+                "Instagram oficial exige: ig_user_id, access_token, verify_token e "
+                f"app_secret (faltando: {', '.join(faltando)}). Sem o app_secret não dá "
+                "para validar a assinatura X-Hub-Signature-256 e qualquer um poderia "
+                "forjar mensagens no seu canal.",
+            )
+        return {
+            "ig_user_id": str(config["ig_user_id"]).strip(),
+            "access_token": str(config["access_token"]).strip(),
+            "verify_token": str(config["verify_token"]).strip(),
+            "app_secret": str(config["app_secret"]).strip(),
+            "webhook_url": config.get("webhook_url", ""),
+        }
+
+    if tipo == "whatsapp_oficial":
+        faltando = [c for c in ("phone_number_id", "access_token", "verify_token", "app_secret")
+                    if not str(config.get(c) or "").strip()]
+        if faltando:
+            raise HTTPException(
+                400,
+                "WhatsApp oficial exige: phone_number_id, access_token, verify_token e "
+                f"app_secret (faltando: {', '.join(faltando)}). Sem o app_secret não dá "
+                "para validar a assinatura X-Hub-Signature-256 e qualquer um poderia "
+                "forjar mensagens no seu canal.",
+            )
+        return {
+            "phone_number_id": str(config["phone_number_id"]).strip(),
+            "access_token": str(config["access_token"]).strip(),
+            "verify_token": str(config["verify_token"]).strip(),
+            "app_secret": str(config["app_secret"]).strip(),
+            "webhook_url": config.get("webhook_url", ""),
+        }
+
+    if tipo == "telegram":
+        if not str(config.get("token") or "").strip():
+            raise HTTPException(400, "Informe o token do bot do Telegram.")
+        return {"token": str(config["token"]).strip()}
+
+    if tipo == "whatsapp":
+        return {"instance_name": config.get("instance_name", ""), "status": "", "qr": ""}
+
+    return config
+
 _poller_task: asyncio.Task | None = None
 _keepalive_task: asyncio.Task | None = None
 _worker_caixa_task: asyncio.Task | None = None
+_sync_task: asyncio.Task | None = None
 
 
 def _gerar_secret() -> str:
@@ -59,13 +214,11 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
             canais = [c for c in await repo.listar_canais() if c["tipo"] == "instagram" and c["ativo"]]
             for canal in canais:
                 cfg = canal["config"]
-                usuario = cfg.get("usuario", "")
-                senha = cfg.get("senha", "")
                 sessionid = cfg.get("sessionid", "")
-                if not usuario or not (senha or sessionid):
+                if not sessionid:
                     continue
                 novos, vistos = await instagram.coletar_novas(
-                    usuario, senha, sessionid, cfg.get("ig_vistos")
+                    sessionid, cfg.get("ig_vistos")
                 )
                 if vistos != cfg.get("ig_vistos"):
                     await repo.patch_canal_config(canal["id"], "ig_vistos", vistos)
@@ -84,13 +237,60 @@ async def _poller_instagram(intervalo: float = 25.0) -> None:
 
 
 # --------------------------------------------------------------------------
-# Keepalive Evolution (free tier hiberna apos ~15 min sem trafego)
+# Keepalive Evolution — SÓ para o canal NÃO OFICIAL
+#
+# O Evolution (Baileys) não é empurrado pela Meta: ele se inscreve no WhatsApp
+# por conta própria e depende de um processo vivo. Se o Render hibernar, a
+# Evolution perde a conexão e as mensagens param de chegar.
+#
+# ATENÇÃO AO CUSTO: o Render hiberna ~15 min sem tráfego. Um keepalive com
+# intervalo MENOR que 15 min impede a hibernação, ou seja, o serviço fica ligado
+# o mês inteiro: ~720h das 750h/mês do plano grátis. Dois serviços assim
+# estouram o limite (1440h > 750h), e é exatamente por isso que o consumo
+# acabava antes dos 14 dias. Com intervalo ACIMA de 15 min o serviço dorme entre
+# os pings e o custo cai para algumas horas por mês.
+# Os canais OFICIAIS (whatsapp_oficial / instagram_oficial) NÃO precisam
+# disto: o Meta chama o webhook, a Edge Function grava a fila e acorda o Render
+# sob demanda. Prefira os oficiais sempre que possível.
 # --------------------------------------------------------------------------
 
-async def _keepalive_evolution(intervalo: float = 240.0) -> None:
+async def _keepalive_evolution(intervalo: float | None = None) -> None:
     if not settings.has_evolution:
         return
-    log.info("Keepalive Evolution iniciado")
+    if intervalo is None:
+        # Acima de 900s o Render hiberna entre os pings e o custo despenca.
+        intervalo = max(float(settings.evolution_keepalive_seg), 60.0)
+    # Só liga o keepalive se existir canal NÃO oficial usando Evolution.
+    try:
+        canais = [c for c in await repo.listar_canais()
+                  if c["tipo"] == "whatsapp" and c["ativo"] and c["config"].get("instance_name")]
+    except Exception as e:
+        log.warning("Não foi possível verificar canais Evolution: %s", e)
+        return
+    if not canais:
+        log.info(
+            "Keepalive Evolution DESLIGADO: nenhum canal 'whatsapp' (Evolution) ativo. "
+            "Com apenas canais oficiais, o Render pode hibernar sem perder mensagens."
+        )
+        return
+
+    # O Render hiberna ~15 min sem tráfego: ping mais frequente que isso
+    # impede a hibernação e consome o mês inteiro (~720h de 750h).
+    JANELA_HIBERNACAO_SEG = 900
+    if intervalo < JANELA_HIBERNACAO_SEG:
+        horas = 24 * 30
+        log.warning(
+            "Keepalive Evolution LIGADO (a cada %.0fs). Isso é MAIS FREQUENTE que a "
+            "janela de hibernação do Render (~%.0fs), então o serviço fica ligado o mês "
+            "inteiro: ~%dh das 750h do plano grátis. Aumente EVOLUTION_KEEPALIVE_SEG para "
+            ">%ds ou migre para 'WhatsApp oficial (Cloud API)', que dispensa este custo.",
+            intervalo, JANELA_HIBERNACAO_SEG, horas, JANELA_HIBERNACAO_SEG,
+        )
+    else:
+        log.info(
+            "Keepalive Evolution LIGADO (a cada %.0fs): o Render hiberna entre os pings, "
+            "então o custo é de algumas horas por mês.", intervalo,
+        )
     url, key = settings.evolution_api_url, settings.evolution_api_key
     while True:
         try:
@@ -114,28 +314,33 @@ async def _keepalive_evolution(intervalo: float = 240.0) -> None:
 # --------------------------------------------------------------------------
 
 def _prefixo_usuario(canal: dict, remetente: str) -> str:
-    if canal["tipo"] == "telegram":
+    tipo = canal["tipo"]
+    if tipo == "telegram":
         return f"tg:{remetente}"
-    if canal["tipo"] == "whatsapp":
+    if tipo in ("whatsapp", "whatsapp_oficial"):
         return f"wa:{remetente}"
-    if canal["tipo"] == "instagram":
+    if tipo in ("instagram", "instagram_oficial"):
         return f"ig:{remetente}"
     return f"web:{remetente}"
 
 
+# Canais oficiais da Meta: o id do interlocutor é sempre numérico e já vem
+# normalizado (wa_id / ig-scoped id) da Edge Function.
 async def _enviar_resposta(canal: dict, remetente: str, resposta: str) -> None:
     cfg = canal["config"]
-    if canal["tipo"] == "telegram":
+    tipo = canal["tipo"]
+    if tipo == "telegram":
         await telegram.enviar_mensagem(cfg["token"], remetente, resposta)
-    elif canal["tipo"] == "whatsapp":
+    elif tipo == "whatsapp":
         if settings.has_evolution and cfg.get("instance_name"):
             url, key = _evo_creds()
             await evolution.enviar_mensagem(url, key, cfg["instance_name"], remetente, resposta)
-    elif canal["tipo"] == "instagram":
-        usuario, senha = cfg.get("usuario", ""), cfg.get("senha", "")
+    elif tipo == "instagram":
         sessionid = cfg.get("sessionid", "")
-        if usuario and (senha or sessionid):
-            await instagram.enviar_mensagem(usuario, senha, sessionid, remetente, resposta)
+        if sessionid:
+            await instagram.enviar_mensagem(sessionid, remetente, resposta)
+    elif tipo in ("whatsapp_oficial", "instagram_oficial"):
+        await meta_oficial.enviar(cfg, tipo, remetente, resposta)
 
 
 def _proxima_tentativa(tentativas: int) -> datetime:
@@ -228,22 +433,68 @@ async def _worker_caixa() -> None:
         await asyncio.sleep(2)
 
 
+async def _reconciliar_tarefas_de_fundo() -> None:
+    """Liga/desliga as tarefas de fundo conforme os canais ativos no banco.
+    Sem isso, um canal Instagram/Evolution criado pelo painel só começaria a
+    funcionar depois de reiniciar o serviço, porque as tarefas nascem uma vez
+    no lifespan. Como o Render hiberna, o usuário não reinicia nada e o canal
+    ficava morto. Aqui cada mudança de canal é reconciliada na hora.
+    """
+    global _poller_task, _keepalive_task, _sync_task
+    try:
+        canais = await repo.listar_canais()
+    except Exception as e:
+        log.warning("Nao foi possivel reconciliar tarefas de fundo: %s", e)
+        return
+
+    quer_instagram = any(c["tipo"] == "instagram" and c["ativo"] for c in canais)
+    quer_evolution = any(c["tipo"] == "whatsapp" and c["ativo"] for c in canais)
+
+    def _garantir(tarefa: asyncio.Task | None, ativo: bool,
+                  criar, nome: str) -> asyncio.Task | None:
+        if ativo and (tarefa is None or tarefa.done()):
+            log.info("Ligando tarefa de fundo: %s", nome)
+            return asyncio.create_task(criar())
+        if not ativo and tarefa is not None and not tarefa.done():
+            log.info("Desligando tarefa de fundo: %s", nome)
+            tarefa.cancel()
+            return None
+        return tarefa if ativo else None
+
+    _poller_task = _garantir(_poller_task, quer_instagram, _poller_instagram,
+                             "poller Instagram (nao oficial)")
+    if quer_evolution:
+        _keepalive_task = _garantir(_keepalive_task, True, _keepalive_evolution,
+                                    "keepalive Evolution (nao oficial)")
+        _sync_task = _garantir(_sync_task, True, _sincronizar_evolution,
+                               "sincronizacao Evolution (nao oficial)")
+    else:
+        _keepalive_task = _garantir(_keepalive_task, False, _keepalive_evolution,
+                                    "keepalive Evolution (nao oficial)")
+        _sync_task = _garantir(_sync_task, False, _sincronizar_evolution,
+                               "sincronizacao Evolution (nao oficial)")
+
+    if not quer_instagram:
+        log.info("Nenhum canal Instagram nao-oficial ativo: poller desligado.")
+    if not quer_evolution:
+        log.info("Nenhum canal WhatsApp (Evolution) ativo: keepalive desligado. "
+                 "Canais oficiais nao precisam de keepalive.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.has_db:
         await get_pool()
-        global _poller_task, _keepalive_task, _worker_caixa_task
-        _poller_task = asyncio.create_task(_poller_instagram())
-        _keepalive_task = asyncio.create_task(_keepalive_evolution())
+        global _worker_caixa_task
         _worker_caixa_task = asyncio.create_task(_worker_caixa())
-        asyncio.create_task(_sincronizar_evolution())
+        # Só há tarefa de fundo nos canais NÃO OFICIAIS. Os oficiais são
+        # 100% push (webhook), então nada de polling/keepalive: é isso que
+        # permite ao Render passar o mês hibernando.
+        await _reconciliar_tarefas_de_fundo()
     yield
-    if _poller_task:
-        _poller_task.cancel()
-    if _keepalive_task:
-        _keepalive_task.cancel()
-    if _worker_caixa_task:
-        _worker_caixa_task.cancel()
+    for tarefa in (_poller_task, _keepalive_task, _worker_caixa_task, _sync_task):
+        if tarefa:
+            tarefa.cancel()
     await close_pool()
 
 
@@ -414,7 +665,7 @@ async def delete_agente(agente_id: int):
 
 @app.get("/api/agentes/{agente_id}/canais")
 async def get_canais(agente_id: int):
-    return await repo.listar_canais(agente_id)
+    return await repo.listar_canais(agente_id, redigir=True)
 
 
 @app.post("/api/agentes/{agente_id}/canais")
@@ -425,7 +676,7 @@ async def post_canal(agente_id: int, request: Request):
     tipo = body.get("tipo", "").strip()
     nome = (body.get("nome") or "").strip()
     config = dict(body.get("config") or {})
-    if tipo not in ("telegram", "whatsapp", "instagram", "webhook"):
+    if tipo not in TIPOS_CANAL:
         raise HTTPException(400, "Tipo de canal inválido.")
     if not nome:
         raise HTTPException(400, "Informe um nome para o canal.")
@@ -433,6 +684,9 @@ async def post_canal(agente_id: int, request: Request):
     existentes = await repo.listar_canais(agente_id)
     if len(existentes) >= MAX_CANAIS_POR_AGENTE:
         raise HTTPException(400, f"Cada agente aceita no máximo {MAX_CANAIS_POR_AGENTE} canais.")
+
+    config = _validar_config_canal(tipo, config, agent_id=agente_id)
+    await _exigir_identificador_unico(tipo, config)
 
     config["secret"] = _gerar_secret()
     if tipo == "whatsapp":
@@ -443,14 +697,19 @@ async def post_canal(agente_id: int, request: Request):
             canal = await repo.obter_canal(canal["id"])
             canal["config"]["qr"] = qr
             canal["config"]["status"] = canal["config"].get("status", "scanning")
-            return canal
+            await _reconciliar_tarefas_de_fundo()
+            return _publico(canal)
         except HTTPException:
             await repo.excluir_canal(canal["id"])
             raise
         except Exception as e:
             await repo.excluir_canal(canal["id"])
             raise HTTPException(400, f"Falha ao iniciar WhatsApp: {e}")
-    return await repo.criar_canal(agente_id, tipo, nome, config)
+    if tipo in ("whatsapp_oficial", "instagram_oficial"):
+        config["webhook_url"] = _url_webhook_meta(tipo)
+    canal = await repo.criar_canal(agente_id, tipo, nome, config)
+    await _reconciliar_tarefas_de_fundo()
+    return _publico(canal)
 
 
 @app.put("/api/canais/{canal_id}")
@@ -465,14 +724,23 @@ async def put_canal(canal_id: int, request: Request):
     if not atual:
         raise HTTPException(404, "Canal não encontrado.")
 
-    config = dict(atual["config"])
-    for chave, valor in novos.items():
-        if valor is None or (isinstance(valor, str) and not valor.strip()):
-            continue
-        config[chave] = valor.strip() if isinstance(valor, str) else valor
+    # Mescla preservando segredos: o painel reexibe '********' e não deve
+    # sobrescrever o token/sessionid guardado com esse placeholder.
+    tipo = atual["tipo"]
+    config = repo.mesclar_config_sync(atual, novos)
+    if tipo in TIPOS_CANAL:
+        config = _validar_config_canal(tipo, config, agent_id=atual.get("agente_id", 0))
+        await _exigir_identificador_unico(tipo, config, ignorar_canal_id=canal_id)
+    if tipo == "whatsapp":
+        config["instance_name"] = atual["config"].get("instance_name", "")
+        config["status"] = atual["config"].get("status", "")
+        config.setdefault("qr", "")
+    if tipo in TIPOS_CANAL_OFICIAL:
+        config["webhook_url"] = _url_webhook_meta(tipo)
     config["secret"] = atual["config"].get("secret", _gerar_secret())
-    config["instance_name"] = atual["config"].get("instance_name", config.get("instance_name", ""))
-    return await repo.atualizar_canal(canal_id, nome, config, ativo)
+    salvo = await repo.atualizar_canal(canal_id, nome, config, ativo)
+    await _reconciliar_tarefas_de_fundo()
+    return _publico(salvo)
 
 
 @app.delete("/api/canais/{canal_id}")
@@ -488,6 +756,7 @@ async def delete_canal(canal_id: int):
             )
         except Exception as e:
             log.warning("Falha ao remover instância Evolution do canal %s: %s", canal_id, e)
+    await _reconciliar_tarefas_de_fundo()
     return {"ok": True}
 
 
@@ -638,10 +907,10 @@ async def testar_canal(canal_id: int):
             st = await evolution.status_instancia(url, key, cfg.get("instance_name", ""))
             return {"ok": True, "info": st.get("instance", {}).get("state", "")}
         if canal["tipo"] == "instagram":
-            await instagram.obter_cliente(
-                cfg.get("usuario", ""), cfg.get("senha", ""), cfg.get("sessionid", "")
-            )
-            return {"ok": True, "info": "logado"}
-        return {"ok": True, "info": "webhook pronto"}
+            client = await instagram.obter_cliente(cfg.get("sessionid", ""))
+            return {"ok": True, "info": f"@{client.username} (não-oficial)"}
+        if canal["tipo"] in TIPOS_CANAL_OFICIAL:
+            info = await meta_oficial.verificar(cfg, canal["tipo"])
+            return {"ok": True, "info": f"{info} (oficial)"}
     except Exception as e:
         raise HTTPException(400, f"Falha no teste: {e}")

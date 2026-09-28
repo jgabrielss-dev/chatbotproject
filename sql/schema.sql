@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS agentes (
 CREATE TABLE IF NOT EXISTS canais (
   id SERIAL PRIMARY KEY,
   agente_id INTEGER NOT NULL REFERENCES agentes(id) ON DELETE CASCADE,
-  tipo TEXT NOT NULL CHECK (tipo IN ('telegram', 'whatsapp', 'instagram', 'webhook')),
+  -- 'whatsapp' e 'instagram' são integrações NÃO OFICIAIS (Evolution/Baileys e
+  -- instagrapi). As oficiais da Meta ficam em 'whatsapp_oficial' e
+  -- 'instagram_oficial'. Ver supabase/migrations/0003_canais_meta_oficial.sql.
+  tipo TEXT NOT NULL CHECK (tipo IN ('telegram', 'whatsapp', 'instagram', 'webhook', 'whatsapp_oficial', 'instagram_oficial')),
   nome TEXT NOT NULL,
   config JSONB NOT NULL DEFAULT '{}'::jsonb,
   ativo BOOLEAN NOT NULL DEFAULT TRUE,
@@ -20,6 +23,12 @@ CREATE TABLE IF NOT EXISTS canais (
 
 CREATE INDEX IF NOT EXISTS idx_canais_agente ON canais (agente_id);
 CREATE INDEX IF NOT EXISTS idx_canais_tipo ON canais (tipo);
+-- Roteamento dos webhooks oficiais da Meta (o canal é resolvido pelo
+-- phone_number_id / ig_user_id do evento, sem segredo na URL).
+CREATE INDEX IF NOT EXISTS idx_canais_tipo_identificador
+  ON canais (tipo, (config ->> 'phone_number_id'));
+CREATE INDEX IF NOT EXISTS idx_canais_tipo_ig_user
+  ON canais (tipo, (config ->> 'ig_user_id'));
 
 -- Colunas abertas: "memoria" guarda o que o system prompt mandar a IA extrair do usuário
 CREATE TABLE IF NOT EXISTS sessoes (

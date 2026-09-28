@@ -22,6 +22,11 @@ class Settings:
     evolution_instance_prefix: str = os.getenv("EVOLUTION_INSTANCE_PREFIX", "ag").lower()
     evolution_api_url: str = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
     evolution_api_key: str = os.getenv("EVOLUTION_API_KEY", "")
+    # Intervalo do keepalive Evolution, em segundos. Acima de 900s o Render
+    # hiberna entre os pings (custo baixo); abaixo disso o serviço fica ligado
+    # o mês inteiro e consome as 750h do plano grátis. Os canais OFICIAIS da
+    # Meta não usam este valor.
+    evolution_keepalive_seg: float = float(os.getenv("EVOLUTION_KEEPALIVE_SEG", "1800"))
 
     @property
     def has_evolution(self) -> bool:

@@ -3,54 +3,86 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 from instagrapi import Client
 
 log = logging.getLogger("instagram")
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# Fora de app/ de propósito: o Render monta o app em disco efêmero, então a
+# sessão é reautenticada pelo sessionid guardado no canal a cada deploy.
+# O nome do arquivo é o hash do sessionid e o diretório é ignorado pelo Git.
+DATA_DIR = Path(os.getenv("IG_DATA_DIR") or (Path(__file__).resolve().parent.parent.parent / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Clientes autenticados por usuário, com lock por usuário (instagrapi é síncrono).
 _clientes: dict[str, Client] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
-# ATENÇÃO: automação de Instagram por meios não-oficiais (instagrapi) viola os
-# termos do Meta, pode quebrar a qualquer momento e causar bloqueio da conta.
-# Para uso comercial estável, o CLIENTE deve obter a API oficial da Meta
-# (Instagram Messaging API) e usar o adapter oficial; aqui fica o método
-# não-oficial com aviso explícito.
+# ---------------------------------------------------------------------------
+# Canal Instagram — método NÃO OFICIAL (instagrapi / API privada)
+#
+# ⚠️ RISCO: viola os Termos de Uso do Instagram/Meta, usa endpoints privados
+# que mudam sem aviso e pode BANIR a conta a qualquer momento. Não há SLA.
+# Para produção, use o canal oficial `instagram_oficial` (Instagram Messaging
+# API da Meta), que tem webhook, é estável e não arrisca a conta.
+#
+# ATIVAÇÃO: apenas por `sessionid`. O login por senha foi REMOVIDO de propósito:
+# desde 2026 o Instagram exige atestação de app (Play Integrity / keystore) no
+# `accounts/login/`, que um cliente Python puro não consegue produzir, e
+# responde "Your version of Instagram is out of date" para qualquer
+# app_version/version_code. Verificar o problema 1 do README deste arquivo:
+# não existe versão do instagrapi que contorne isso.
+#
+# Como obter o sessionid:
+#   1. No Chrome/Edge, abra https://www.instagram.com e logue normalmente.
+#   2. F12 -> aba "Application" (Chrome) ou "Storage" (Edge)
+#      -> Cookies -> https://www.instagram.com -> campo "sessionid".
+#   3. Copie o valor e cole no campo "sessionid" do canal.
+# O cookie expira; quando estourar, repita o passo 2.
+# ---------------------------------------------------------------------------
 
 
-def _arquivo_sessao(username: str) -> Path:
-    return DATA_DIR / f"ig_{username}.json"
+def _chave(sessionid: str) -> str:
+    """Chave de cache/lock: deriva só do sessionid, sem guardar o valor cru."""
+    marca = hashlib.sha1(sessionid.encode()).hexdigest()[:8]
+    return f"sessionid:{marca}"
 
 
-def _chave(username: str, password: str, sessionid: str) -> str:
-    """Chave de cache/lock que muda quando as credenciais mudam."""
-    marca = hashlib.sha1(f"{password}|{sessionid}".encode()).hexdigest()[:8]
-    return f"{username}:{marca}"
+def _arquivo_sessao(sessionid: str) -> Path:
+    # Nome do arquivo usa o hash, nunca o sessionid cru (que é segredo).
+    marca = hashlib.sha1(sessionid.encode()).hexdigest()[:8]
+    return DATA_DIR / f"ig_session_{marca}.json"
 
 
-def _login_sync(username: str, password: str, sessionid: str) -> Client:
+def _login_sync(sessionid: str) -> Client:
+    if not sessionid:
+        raise ValueError(
+            "Instagram nao-oficial exige 'sessionid'. "
+            "O login por senha foi desativado pelo Instagram (atestacao de app). "
+            "Extraia o cookie sessionid de um navegador ja logado."
+        )
     client = Client()
     client.delay_range = [1, 3]
-    arquivo = _arquivo_sessao(username)
+    arquivo = _arquivo_sessao(sessionid)
     if arquivo.exists():
         try:
             client.load_settings(arquivo)
         except Exception as e:
             log.warning("Sessão Instagram inválida, relogando: %s", e)
     try:
-        if sessionid:
-            # Alternativa quando o login por senha é bloqueado (nta_upsell):
-            # reutiliza o cookie "sessionid" de um navegador já logado.
-            client.login_by_sessionid(sessionid)
-        else:
-            client.login(username, password)
+        client.login_by_sessionid(sessionid)
     except Exception as e:
-        log.error("Falha ao autenticar Instagram de %s: %s", username, e)
+        msg = str(e)
+        if "out of date" in msg.lower() or "upgrade your app" in msg.lower():
+            log.error(
+                "Instagram recusou o sessionid com 'out of date'. O cookie "
+                "expirou ou foi revogado: extraia um novo sessionid de um "
+                "navegador ja logado."
+            )
+        else:
+            log.error("Falha ao autenticar Instagram por sessionid: %s", e)
         raise
     client.dump_settings(arquivo)
     return client
@@ -62,69 +94,105 @@ async def _com_lock(chave: str, func, *args):
         return await asyncio.to_thread(func, *args)
 
 
-def _cliente_sync(username: str, password: str, sessionid: str) -> Client:
+def _cliente_sync(sessionid: str) -> Client:
     """Cliente logado SEM adquirir lock (uso interno dentro de _com_lock)."""
-    chave = _chave(username, password, sessionid)
+    chave = _chave(sessionid)
     if chave in _clientes:
         return _clientes[chave]
-    _clientes[chave] = _login_sync(username, password, sessionid)
+    _clientes[chave] = _login_sync(sessionid)
     return _clientes[chave]
 
 
-async def obter_cliente(username: str, password: str = "", sessionid: str = "") -> Client:
+async def obter_cliente(sessionid: str) -> Client:
     """Garante um cliente logado (com cache em disco)."""
-    chave = _chave(username, password, sessionid)
-    return await _com_lock(chave, _cliente_sync, username, password, sessionid)
+    chave = _chave(sessionid)
+    return await _com_lock(chave, _cliente_sync, sessionid)
+
+
+def _thread_key(thread) -> str:
+    """ID numerico da thread usado por approve/send.
+
+    DirectThread.pk e o thread_v2_id (ex.: 17898572618026348) e e o que
+    direct_pending_approve/direct_send convertem com int(). DirectThread.id e o
+    thread_id legado e NAO serve para responder. DirectThread nao possui
+    atributo thread_id.
+    """
+    return str(getattr(thread, "pk", "") or getattr(thread, "id", "") or "")
 
 
 async def coletar_novas(
-    username: str, password: str, sessionid: str, ja_vistos: dict
+    sessionid: str, ja_vistos: dict
 ) -> tuple[list[tuple[str, str, str]], dict]:
     """Retorna (mensagens novas, vistos atualizado).
     (thread_id, msg_id, texto) - apenas mensagens de outras pessoas."""
+
     def _coletar() -> tuple[list[tuple[str, str, str]], dict]:
-        client = _cliente_sync(username, password, sessionid)
+        client = _cliente_sync(sessionid)
         vistos = dict(ja_vistos or {})
         novos: list[tuple[str, str, str]] = []
-        threads = []
-        try:
-            threads += client.direct_messages.pending_threads(amount=20)
-        except Exception as e:
-            log.warning("pending_threads: %s", e)
-        try:
-            threads += client.direct_messages.threads(amount=20, thread_message_amount=20)
-        except Exception as e:
-            log.warning("threads: %s", e)
 
-        for thread in threads:
-            thread_id = thread.thread_id
+        def _registrar(thread) -> None:
+            # `vistos` e a fonte de verdade da deduplicacao, entao a mesma
+            # thread vista na caixa de pendentes e depois na geral nao gera
+            # mensagem repetida.
+            thread_id = _thread_key(thread)
+            if not thread_id:
+                return
             processados = set(vistos.get(thread_id, []))
-            novos_ids = set()
-            for msg in reversed(thread.messages):
+            for msg in reversed(thread.messages or []):
+                if getattr(msg, "is_sent_by_viewer", False):
+                    continue
                 if str(msg.user_id) == str(client.user_id):
                     continue
                 if not msg.text:
                     continue
                 if msg.id in processados:
                     continue
-                novos_ids.add(msg.id)
-                novos.append((thread_id, msg.id, msg.text))
-            if novos_ids:
-                vistos[thread_id] = list(set(processados) | novos_ids)
+                processados.add(msg.id)
+                novos.append((thread_id, str(msg.id), msg.text))
+            vistos[thread_id] = list(processados)
+
+        # 1) Pedidos de contato: aprovar imediatamente.
+        #    Os métodos são do próprio Client (`client.direct_*`). Não existe um
+        #    namespace `client.direct_messages`: esse nome é o método que lê as
+        #    mensagens de UMA thread (client.direct_messages(thread_id)).
+        try:
+            pendentes = client.direct_pending_inbox(amount=20)
+        except Exception as e:
+            log.warning("direct_pending_inbox falhou: %s", e)
+            pendentes = []
+        for thread in pendentes:
+            thread_id = _thread_key(thread)
+            try:
+                ok = client.direct_pending_approve(int(thread_id))
+                log.info("Pedido de contato %s aprovado=%s", thread_id, ok)
+            except Exception as e:
+                log.warning("Falha ao aprovar pedido de contato %s: %s", thread_id, e)
+            # A mensagem do solicitante e registrada de todo modo, mesmo se a
+            # aprovacao falhar, para nao perder o primeiro contato.
+            _registrar(thread)
+
+        # 2) Caixa principal, que passa a conter as threads recem-aprovadas.
+        try:
+            threads = client.direct_threads(amount=20, thread_message_limit=20)
+        except Exception as e:
+            log.warning("direct_threads falhou: %s", e)
+            threads = []
+        for thread in threads:
+            _registrar(thread)
+
         return novos, vistos
 
-    return await _com_lock(_chave(username, password, sessionid), _coletar)
+    return await _com_lock(_chave(sessionid), _coletar)
 
 
-async def enviar_mensagem(
-    username: str, password: str, sessionid: str, thread_id: str, texto: str
-) -> None:
+async def enviar_mensagem(sessionid: str, thread_id: str, texto: str) -> None:
     def _enviar() -> None:
-        client = _cliente_sync(username, password, sessionid)
+        client = _cliente_sync(sessionid)
         try:
-            client.direct_messages.send(thread_id, texto)
+            client.direct_send(texto, thread_ids=[int(thread_id)])
         except Exception as e:
             log.error("Falha ao enviar DM Instagram: %s", e)
             raise
 
-    await _com_lock(_chave(username, password, sessionid), _enviar)
+    await _com_lock(_chave(sessionid), _enviar)

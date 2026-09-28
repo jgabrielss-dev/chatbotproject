@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .env
+# Sessao do instagrapi: CONTEM o cookie sessionid, nunca versionar.
+data/
 app/data/
 instance.json
 session.json

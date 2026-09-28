@@ -11,3 +11,12 @@ services:
         sync: false
       - key: BASE_URL
         sync: false
+      # Base das Edge Functions do Supabase: e o webhook publico dos canais
+      # OFICIAIS da Meta (whatsapp_oficial / instagram_oficial). Sem isso o
+      # app nao consegue mostrar a URL para cadastrar no painel da Meta.
+      - key: SUPABASE_FUNCTIONS_BASE
+        sync: false
+      # Só usado pelo canal NÃO-oficial (Evolution/Baileys). Acima de 900s o
+      # Render hiberna entre os pings e economiza as 750h/mês do plano gratis.
+      - key: EVOLUTION_KEEPALIVE_SEG
+        value: "1800"

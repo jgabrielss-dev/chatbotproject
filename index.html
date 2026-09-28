@@ -68,6 +68,10 @@
     background: rgba(240,165,59,.08); border: 1px solid var(--warn); color: var(--warn);
     border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5;
   }
+  .aviso-ok {
+    background: rgba(56,178,110,.08); border: 1px solid var(--accent-2); color: var(--accent-2);
+    border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5;
+  }
   .kanal { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--panel-2); }
   .kanal .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
   pre { background: #12141c; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; margin: 8px 0 0; }
@@ -136,11 +140,19 @@
       <div class="row" style="justify-content:space-between;margin-bottom:12px">
         <h2 style="margin:0">Canais</h2>
         <div class="row">
-          <select id="novoCanalTipo" style="width:170px">
-            <option value="telegram">Telegram</option>
-            <option value="whatsapp">WhatsApp</option>
-            <option value="instagram">Instagram</option>
-            <option value="webhook">Webhook genérico</option>
+          <select id="novoCanalTipo" style="width:290px">
+            <optgroup label="Oficiais (Meta) — estáveis, sem keepalive">
+              <option value="whatsapp_oficial">WhatsApp oficial (Cloud API)</option>
+              <option value="instagram_oficial">Instagram oficial (Messaging API)</option>
+            </optgroup>
+            <optgroup label="Oficiais (outros)">
+              <option value="telegram">Telegram</option>
+              <option value="webhook">Webhook genérico</option>
+            </optgroup>
+            <optgroup label="⚠ Não oficiais — risco de ban">
+              <option value="whatsapp">WhatsApp (Evolution/Baileys)</option>
+              <option value="instagram">Instagram (instagrapi)</option>
+            </optgroup>
           </select>
           <button class="btn primary" id="btnNovoCanal">+ Novo canal</button>
         </div>
@@ -281,14 +293,26 @@ async function carregarCanais(agenteId) {
   for (const c of canais) el.appendChild(renderCanal(c));
 }
 
+const TIPOS_NAO_OFICIAIS = { whatsapp: "Evolution/Baileys", instagram: "instagrapi" };
+const ROTULO_TIPO = {
+  whatsapp_oficial: "WhatsApp (oficial)",
+  instagram_oficial: "Instagram (oficial)",
+  telegram: "Telegram",
+  webhook: "Webhook",
+  whatsapp: "WhatsApp (não-oficial)",
+  instagram: "Instagram (não-oficial)",
+};
+
 function renderCanal(c) {
   const div = document.createElement("div");
   div.className = "kanal";
-  const tipo = c.tipo.charAt(0).toUpperCase() + c.tipo.slice(1);
+  const tipo = ROTULO_TIPO[c.tipo] || c.tipo;
+  const naoOficial = TIPOS_NAO_OFICIAIS[c.tipo];
   div.innerHTML = `
     <div class="head">
       <span><strong>${esc(c.nome)}</strong>
-        <span class="badge tipo">${tipo}</span>
+        <span class="badge tipo">${esc(tipo)}</span>
+        ${naoOficial ? `<span class="badge off" title="Integração não oficial: pode falhar ou banir a conta">⚠ ${esc(naoOficial)}</span>` : ""}
         <span class="badge ${c.ativo ? "on" : "off"}">${c.ativo ? "ativo" : "pausado"}</span></span>
       <span class="row">
         <button class="btn sm" data-acao="testar">Testar</button>
@@ -397,13 +421,33 @@ async function renderCanalBody(div, c) {
 
   } else if (tipo === "instagram") {
     body.innerHTML = `
-      <div class="warn"><strong>Aviso:</strong> este canal usa método NÃO-oficial (instagrapi), viola os termos da Meta,
-      pode quebrar a qualquer momento ou bloquear a conta. Para uso estável, o cliente deve obter a API oficial da Meta
-      (Instagram Messaging API) e usar o adapter oficial, evitando custos para você.</div>
-      <p class="muted" style="margin-top:8px">Usuário: <code>${esc(c.config.usuario || "não definido")}</code>
-      &middot; senha: <code>${c.config.senha ? "definida (oculta)" : "não definida"}</code>
-      &middot; sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "não definido"}</code>
-      &middot; as DMs são lidas por polling automático (a cada ~25s).</p>`;
+      <div class="warn"><strong>Método NÃO-oficial (instagrapi / API privada).</strong> Viola os Termos de Uso
+      do Instagram e pode <strong>banir a conta</strong>; os endpoints privados mudam sem aviso e a sessão expira.
+      Para produção e estabilidade, prefira <strong>Instagram (oficial &mdash; Messaging API)</strong>.</div>
+      <p class="muted" style="margin-top:8px">sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "não definido"}</code>
+      &middot; pedidos de contato são aprovados automaticamente
+      &middot; as DMs são lidas por polling (~25s).</p>`;
+
+  } else if (tipo === "instagram_oficial" || tipo === "whatsapp_oficial") {
+    const url = esc(c.config.webhook_url || "—");
+    const familia = tipo === "instagram_oficial" ? "Instagram" : "WhatsApp";
+    const nomeId = tipo === "instagram_oficial" ? "Instagram Business Account ID" : "Phone Number ID";
+    body.innerHTML = `
+      <div class="aviso-ok"><strong>Método OFICIAL da Meta.</strong> Webhook direto, sem polling e
+      <strong>sem keepalive</strong>: o Render pode hibernar e só acorda quando chega mensagem.</div>
+      <p class="muted" style="margin-top:10px"><strong>${nomeId}:</strong> <code>${esc(c.config[tipo === "instagram_oficial" ? "ig_user_id" : "phone_number_id"] || "—")}</code>
+      &middot; <strong>verify_token:</strong> <code>${c.config.verify_token ? "definido (oculto)" : "não definido"}</code>
+      &middot; <strong>app_secret:</strong> <code>${c.config.app_secret ? "definido (oculto)" : "não definido — assine a assinatura para ativar o canal"}</code></p>
+      <p class="muted" style="margin-top:8px">Cole esta URL em <em>Meta for Developers → WhatsApp/Instagram → Webhooks</em>
+      e assine o campo <code>messages</code>:</p>
+      <div class="row"><input type="text" readonly value="${url}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <p class="muted" style="margin-top:6px">O roteamento usa o ${nomeId} do próprio evento,
+      então não há segredo na URL. O <code>app_secret</code> é <strong>obrigatório</strong>:
+      sem ele a assinatura <code>X-Hub-Signature-256</code> não pode ser conferida e o canal
+      é recusado, porque qualquer pessoa poderia forjar mensagens no seu robô.</p>`;
+    const b = body.querySelector("[data-copy]");
+    if (b) b.onclick = (e) => copiar(c.config.webhook_url || "", e.currentTarget);
 
   } else if (tipo === "webhook") {
     const url = await webhookUrl(c);
@@ -438,13 +482,45 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     <p class="muted">Nenhuma credencial necessária — a plataforma já possui a Evolution configurada.
       Uma instância nova será criada e o QR Code exibido em seguida.</p>`;
   if (tipo === "instagram") return `
+    <div class="warn"><strong>Método NÃO-oficial (instagrapi).</strong> Ative apenas com <code>sessionid</code>:
+    o login por senha foi desativado pelo próprio Instagram (exigência de atestação de app), e esta API
+    pode <strong>banir a conta</strong>. Em produção, prefira o canal oficial da Meta.</div>
+    <label>sessionid (obrigatório)</label>
+    <input type="password" data-config="sessionid" value="${val(config.sessionid)}"
+      placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Como obter o sessionid:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Abra <code>https://www.instagram.com</code> e faça login normalmente.</li>
+      <li>Pressione <code>F12</code> e abra a aba <em>Application</em> (Chrome) ou <em>Storage</em> (Edge).</li>
+      <li>Em <em>Cookies</em> &rarr; <code>https://www.instagram.com</code>, localize <code>sessionid</code>.</li>
+      <li>Copie o valor (começa com dígitos e dois-pontos) e cole no campo acima.</li>
+    </ol>
+    <p class="muted" style="margin-top:6px">O cookie expira: quando o canal parar de responder, repita os passos.
+    A conta pode pedir confirmação 2FA no celular em alguns casos.</p>`;
+  if (tipo === "whatsapp_oficial") return `
+    <div class="aviso-ok"><strong>Método OFICIAL</strong> (WhatsApp Cloud API). Sem QR, sem keepalive, sem risco de ban.</div>
     <div class="grid-2">
-      <div><label>Usuário do Instagram</label><input type="text" data-config="usuario" value="${val(config.usuario)}"></div>
-      <div><label>Senha (opcional se usar sessionid)</label><input type="password" data-config="senha" value="${val(config.senha)}" placeholder="${novo ? "" : "deixe em branco para manter"}"></div>
+      <div><label>Phone Number ID</label><input type="text" data-config="phone_number_id" value="${val(config.phone_number_id)}"
+        placeholder="${novo ? "123456789012345" : ""}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"></div>
     </div>
-    <label>sessionid (opcional — use quando o login por senha for bloqueado)</label>
-    <input type="password" data-config="sessionid" value="${val(config.sessionid)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
-    <p class="muted" style="margin-top:4px">Para obter: entre em instagram.com no navegador → F12 → Application/Storage → Cookies → copie o valor de <code>sessionid</code>.</p>`;
+    <label>Access token permanente</label>
+    <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <label>app secret (obrigatório — valida a assinatura do webhook)</label>
+    <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:4px">No painel da Meta, aponte o webhook para a URL exibida após salvar e assine o campo <code>messages</code>.</p>`;
+  if (tipo === "instagram_oficial") return `
+    <div class="aviso-ok"><strong>Método OFICIAL</strong> (Instagram Messaging API). Webhook direto, sem polling.</div>
+    <div class="grid-2">
+      <div><label>Instagram Business Account ID</label><input type="text" data-config="ig_user_id" value="${val(config.ig_user_id)}"
+        placeholder="${novo ? "17841400..." : ""}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"></div>
+    </div>
+    <label>Access token permanente</label>
+    <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <label>app secret (obrigatório — valida a assinatura do webhook)</label>
+    <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:4px">A conta precisa estar em um Business portfolio e vinculada a um app da Meta.</p>`;
   if (tipo === "webhook") return `<p class="muted">Nenhuma credencial necessária. Uma URL com segredo será gerada automaticamente.</p>`;
   return "";
 }

@@ -23,6 +23,43 @@ def _load(value: Any) -> Any:
     return value
 
 
+# Chaves de config que nunca podem voltar ao navegador.
+_CHAVES_SECRETAS = {
+    "token",                 # Telegram
+    "access_token",          # Meta oficial
+    "meta_access_token",
+    "app_secret",            # Meta oficial (assinatura do webhook)
+    "meta_app_secret",
+    "verify_token",          # Meta oficial (handshake do webhook)
+    "meta_verify_token",
+    "senha",                 # legado
+    "sessionid",             # Instagram não-oficial
+    "secret",                # segredo de webhook do Telegram
+    "ig_vistos",             # estado interno do poller
+    "qr",                    # QR code do Baileys
+}
+
+
+def _redigir_config(config: Any) -> Any:
+    """Substitui segredos por um marcador, para a API poder listar os canais."""
+    if not isinstance(config, dict):
+        return config
+    saida = {}
+    for chave, valor in config.items():
+        if chave in _CHAVES_SECRETAS:
+            saida[chave] = "********" if valor else ""
+        else:
+            saida[chave] = valor
+    return saida
+
+
+def _sem_secrets(canal: dict) -> dict:
+    """Copia o canal com a config redigida (use em qualquer resposta HTTP)."""
+    saida = dict(canal)
+    saida["config"] = _redigir_config(canal.get("config") or {})
+    return saida
+
+
 # ---------- Agentes ----------
 
 async def criar_agente(nome: str, system_prompt: str) -> dict:
@@ -93,7 +130,12 @@ def _serialize_canal(row: Any) -> dict:
     return d
 
 
-async def listar_canais(agente_id: int | None = None) -> list[dict]:
+# Versão com segredos redigidos, para devolver ao navegador via API.
+def _serialize_canal_publico(row: Any) -> dict:
+    return _sem_secrets(_serialize_canal(row))
+
+
+async def listar_canais(agente_id: int | None = None, *, redigir: bool = False) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as con:
         if agente_id is not None:
@@ -105,17 +147,19 @@ async def listar_canais(agente_id: int | None = None) -> list[dict]:
             rows = await con.fetch(
                 "SELECT id, agente_id, tipo, nome, config, ativo, criado_em FROM canais ORDER BY criado_em"
             )
-    return [_serialize_canal(r) for r in rows]
+    return [(_serialize_canal_publico if redigir else _serialize_canal)(r) for r in rows]
 
 
-async def obter_canal(canal_id: int) -> dict | None:
+async def obter_canal(canal_id: int, *, redigir: bool = False) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as con:
         row = await con.fetchrow(
             "SELECT id, agente_id, tipo, nome, config, ativo, criado_em FROM canais WHERE id = $1",
             canal_id,
         )
-    return _serialize_canal(row) if row else None
+    if not row:
+        return None
+    return (_serialize_canal_publico if redigir else _serialize_canal)(row)
 
 
 async def atualizar_canal(canal_id: int, nome: str, config: dict, ativo: bool) -> dict | None:
@@ -127,6 +171,40 @@ async def atualizar_canal(canal_id: int, nome: str, config: dict, ativo: bool) -
             nome, _json(config), ativo, canal_id,
         )
     return _serialize_canal(row) if row else None
+
+
+async def atualizar_canal_publico(canal_id: int, nome: str, config: dict, ativo: bool) -> dict | None:
+    """Igual a atualizar_canal, mas devolve a config já redigida."""
+    canal = await atualizar_canal(canal_id, nome, config, ativo)
+    return _sem_secrets(canal) if canal else None
+
+
+def mesclar_config_sync(canal: dict, patch: dict) -> dict:
+    """Mescla `patch` na config já salva, preservando os segredos.
+
+    O painel reexibe '********' nas chaves secretas; se o usuário salvar sem
+    digitar nada, esse placeholder NÃO pode sobrescrever o valor real.
+    """
+    base = dict(canal.get("config") or {})
+    for chave, valor in (patch or {}).items():
+        if valor is None:
+            continue
+        if valor == "********" and chave in _CHAVES_SECRETAS:
+            continue
+        if isinstance(valor, str) and not valor.strip() and chave in _CHAVES_SECRETAS:
+            # Campo vazio = "não quero trocar o segredo", não "apague o segredo".
+            continue
+        base[chave] = valor
+    return base
+
+
+async def mesclar_config(canal_id: int, patch: dict) -> dict | None:
+    """Atualiza só as chaves presentes em `patch`, preservando os segredos."""
+    canal = await obter_canal(canal_id)
+    if not canal:
+        return None
+    base = mesclar_config_sync(canal, patch)
+    return await atualizar_canal(canal_id, canal["nome"], base, canal["ativo"])
 
 
 async def excluir_canal(canal_id: int) -> bool:
