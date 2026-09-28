@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS caixa_entrada (
   canal_id INTEGER NOT NULL REFERENCES canais(id) ON DELETE CASCADE,
   remetente TEXT NOT NULL,
   texto TEXT NOT NULL,
-  origem TEXT NOT NULL DEFAULT '',
+  -- Id único do evento (tg:update_id, wa:key.id, ig:thread:msg, web:uuid).
+  -- NUNCA vazio: ver uq_caixa_origem.
+  origem TEXT NOT NULL,
   payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   status TEXT NOT NULL DEFAULT 'pendente'
     CHECK (status IN ('pendente', 'processando', 'respondido', 'sem_resposta', 'erro')),
@@ -70,9 +72,43 @@ CREATE TABLE IF NOT EXISTS caixa_entrada (
   ultimo_erro TEXT,
   resposta TEXT,
   criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
-  processado_em TIMESTAMPTZ
+  -- Quando a resposta foi entregue.
+  processado_em TIMESTAMPTZ,
+  -- Quando a mensagem entrou em 'processando'. Sem isto, reenfileirar o que
+  -- ficou preso usaria criado_em e devolveria à fila um item que estava sendo
+  -- processado AGORA, respondendo a mesma mensagem duas vezes.
+  processando_em TIMESTAMPTZ
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_caixa_origem ON caixa_entrada (canal_id, origem) WHERE origem <> '';
+-- Índice NÃO parcial: o PostgREST (upsert da edge function, onConflict
+-- "canal_id,origem") não consegue provar o predicado de um índice parcial e a
+-- inserção falharia. Consequência: 'origem' precisa ser única e não-vazia em
+-- todas as mensagens, o que o app garante gerando id por evento.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_caixa_origem ON caixa_entrada (canal_id, origem);
 CREATE INDEX IF NOT EXISTS idx_caixa_fila ON caixa_entrada (status, proxima_tentativa);
 CREATE INDEX IF NOT EXISTS idx_caixa_canal ON caixa_entrada (canal_id, criado_em);
+
+-- Sessões do Instagram guardadas no Postgres (grátis, junto do resto).
+-- O disco do Render é efêmero: sem isto, todo cold start relogaria a conta e
+-- a conta cairia no limite de logins/bloqueio do Instagram.
+-- A chave é 'sessionid:<sha1[:8]>' (nunca o sessionid cru, que é segredo).
+CREATE TABLE IF NOT EXISTS instagram_sessoes (
+  username TEXT PRIMARY KEY,
+  dados JSONB NOT NULL DEFAULT '{}'::jsonb,
+  atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- RLS ligado e sem policy: o app acessa com service_role (que ignora RLS) e o
+-- anon/authenticated do PostgREST não enxerga nada. Sem isto, qualquer pessoa
+-- com a public anon key leria os cookies de sessão do Instagram pela API.
+ALTER TABLE instagram_sessoes ENABLE ROW LEVEL SECURITY;
+
+-- Grants do schema public. Um `CREATE SCHEMA public` (recuperacao de banco,
+-- restore de backup) recria o schema SEM os grants que o Supabase instala, e a
+-- edge function passa a falhar com "permission denied for schema public".
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;

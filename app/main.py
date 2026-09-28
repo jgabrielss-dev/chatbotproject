@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,8 +26,11 @@ log = logging.getLogger("main")
 RAIZ = Path(__file__).resolve().parent.parent
 INDEX_HTML = RAIZ / "index.html"
 MAX_CANAIS_POR_AGENTE = 5
-MAX_TENTATIVAS_INBOX = 8
-INBOX_BACKOFF_BASE_SEG = 5
+
+# Janela que o webhook generico espera o worker responder antes de devolver
+# "ainda na fila". O pedido NUNCA e perdido: expirado o prazo, a mensagem segue
+# na caixa_entrada e e respondida assim que o worker conseguir.
+WEBHOOK_GENERICO_ESPERA_SEG = 25.0
 
 # Canais OFICIAIS (webhook direto da Meta, sem polling e sem keepalive: o Render
 # pode hibernar) versus NÃO OFICIAIS (Evolution/Baileys e instagrapi, que
@@ -54,11 +59,6 @@ AVISO_CANAL_NAO_OFICIAL = {
         "'Instagram (oficial - Messaging API)'."
     ),
 }
-
-
-def _publico(canal: dict | None) -> dict | None:
-    """Redige os segredos do canal antes de devolver na API."""
-    return repo._sem_secrets(canal) if canal else canal
 
 
 async def _exigir_identificador_unico(
@@ -189,6 +189,20 @@ _sync_task: asyncio.Task | None = None
 
 def _gerar_secret() -> str:
     return secrets.token_urlsafe(16)
+
+
+def _secret_igual(a: str, b: str) -> bool:
+    """Compara segredos em tempo constante (evita vazar o valor por tempo)."""
+    return hmac.compare_digest((a or "").encode("utf-8"), (b or "").encode("utf-8"))
+
+
+def _canal_publico(canal: dict | None) -> dict | None:
+    """Copia do canal com os segredos mascarados, para ir ao navegador."""
+    if not canal:
+        return canal
+    saida = dict(canal)
+    saida["config"] = repo.redigir_config(canal.get("config") or {})
+    return saida
 
 
 # --------------------------------------------------------------------------
@@ -330,36 +344,49 @@ async def _enviar_resposta(canal: dict, remetente: str, resposta: str) -> None:
     cfg = canal["config"]
     tipo = canal["tipo"]
     if tipo == "telegram":
+        if not cfg.get("token"):
+            raise RuntimeError("canal de telegram sem token definido")
         await telegram.enviar_mensagem(cfg["token"], remetente, resposta)
     elif tipo == "whatsapp":
-        if settings.has_evolution and cfg.get("instance_name"):
-            url, key = _evo_creds()
-            await evolution.enviar_mensagem(url, key, cfg["instance_name"], remetente, resposta)
+        if not (settings.has_evolution and cfg.get("instance_name")):
+            raise RuntimeError("canal de whatsapp sem Evolution configurada")
+        url, key = _evo_creds()
+        await evolution.enviar_mensagem(url, key, cfg["instance_name"], remetente, resposta)
     elif tipo == "instagram":
         sessionid = cfg.get("sessionid", "")
-        if sessionid:
-            await instagram.enviar_mensagem(sessionid, remetente, resposta)
+        if not sessionid:
+            raise RuntimeError("canal de instagram sem 'sessionid' definido")
+        await instagram.enviar_mensagem(sessionid, remetente, resposta)
     elif tipo in ("whatsapp_oficial", "instagram_oficial"):
         await meta_oficial.enviar(cfg, tipo, remetente, resposta)
 
 
 def _proxima_tentativa(tentativas: int) -> datetime:
-    atraso = min(INBOX_BACKOFF_BASE_SEG * (2 ** min(tentativas - 1, 6)), 900)
+    """Backoff para uma falha. A mensagem NUNCA sai da fila: ela volta para o
+    fim dela (proxima_tentativa no futuro) e é tentada de novo em ciclo."""
+    base = settings.inbox_backoff_base_seg
+    teto = settings.inbox_backoff_teto_seg
+    atraso = min(base * (2 ** min(tentativas - 1, 6)), teto)
     return datetime.now(timezone.utc) + timedelta(seconds=atraso)
 
 
-async def _processar_caixa(limite: int = 8) -> None:
-    await repo.reenfileirar_processando()
+async def _processar_caixa(limite: int | None = None) -> None:
+    limite = limite or settings.inbox_lote
+    devolvidas = await repo.reenfileirar_processando()
+    if devolvidas:
+        log.warning("%s mensagem(ns) presa(s) em 'processando' voltaram para o fim da fila", devolvidas)
     for item in await repo.listar_caixa_para_processar(limite):
         canal = await repo.obter_canal(item["canal_id"])
         if not canal:
-            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
-                                    _proxima_tentativa(item["tentativas"] + 1),
+            await repo.falhar_caixa(item["id"], _proxima_tentativa(item["tentativas"] + 1),
                                     "canal não encontrado")
             continue
-        if canal["tipo"] == "webhook":
-            await repo.concluir_caixa(item["id"], "sem_resposta")
+        if not canal["ativo"]:
+            await repo.falhar_caixa(item["id"], _proxima_tentativa(item["tentativas"] + 1),
+                                    "canal está pausado")
             continue
+        # O canal "webhook" tambem passa pelo worker: a rota so enfileira e
+        # espera. Pular aqui marcaria sem_resposta sem nunca gerar a resposta.
         await repo.marcar_caixa_processando(item["id"])
         try:
             resposta = await _tratar_mensagem(
@@ -367,8 +394,7 @@ async def _processar_caixa(limite: int = 8) -> None:
             )
         except Exception as e:
             log.exception("Falha ao gerar resposta (inbox %s): %s", item["id"], e)
-            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
-                                    _proxima_tentativa(item["tentativas"] + 1), str(e))
+            await repo.falhar_caixa(item["id"], _proxima_tentativa(item["tentativas"] + 1), str(e))
             continue
         if not resposta:
             await repo.concluir_caixa(item["id"], "sem_resposta")
@@ -377,8 +403,7 @@ async def _processar_caixa(limite: int = 8) -> None:
             await _enviar_resposta(canal, item["remetente"], resposta)
         except Exception as e:
             log.exception("Falha ao enviar resposta (inbox %s): %s", item["id"], e)
-            await repo.falhar_caixa(item["id"], item["tentativas"] + 1,
-                                    _proxima_tentativa(item["tentativas"] + 1), str(e))
+            await repo.falhar_caixa(item["id"], _proxima_tentativa(item["tentativas"] + 1), str(e))
             continue
         await repo.concluir_caixa(item["id"], "respondido", resposta)
         log.info("Inbox %s respondida no canal %s (de %s)", item["id"], canal["id"], item["remetente"])
@@ -386,12 +411,21 @@ async def _processar_caixa(limite: int = 8) -> None:
 
 async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
     """Rede de segurança do WhatsApp: se um webhook caiu (app dormindo/hibernação),
-    busca as mensagens recebidas na Evolution e as enfileira para responder depois."""
+    busca as mensagens recebidas na Evolution e as enfileira para responder depois.
+
+    Também reconfere a URL de webhook dos canais a cada ~10 minutos: se a Edge
+    Function ou a BASE_URL mudarem (ou o segredo for trocado), o canal volta a
+    entregar sozinho, sem ninguém precisar abrir o painel."""
     if not settings.has_evolution:
         return
     url, key = settings.evolution_api_url, settings.evolution_api_key
+    volta = 0
     while True:
         try:
+            if volta <= 0:
+                volta = 1
+                await _reconciliar_webhooks()
+            volta += 1
             canais = [c for c in await repo.listar_canais() if c["tipo"] == "whatsapp"]
             for canal in canais:
                 instancia = canal["config"].get("instance_name")
@@ -419,6 +453,8 @@ async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
                     await repo.patch_canal_config(canal["id"], "sync_caixa_desde", maior_ts)
         except Exception as e:
             log.warning("Erro na sincronização Evolution: %s", e)
+        if volta >= 20:  # ~10 min com intervalo de 30s
+            volta = 0
         await asyncio.sleep(intervalo)
 
 
@@ -481,6 +517,63 @@ async def _reconciliar_tarefas_de_fundo() -> None:
                  "Canais oficiais nao precisam de keepalive.")
 
 
+async def _reconciliar_webhooks() -> None:
+    """Reconfere, uma vez por cold start, as URLs de webhook já registradas.
+
+    Cobre a migração para a URL com segredo (a instância antiga continuaria
+    chamando a URL velha e pararia de entregar), a troca de BASE_URL e o
+    redesenho das rotas da Edge Function. Sem isto, cada deploy deixava o
+    Telegram e o WhatsApp mudos até alguém clicar em "registrar webhook" no
+    painel. Uma chamada por canal."""
+    url, key = settings.evolution_api_url, settings.evolution_api_key
+    for canal in await repo.listar_canais():
+        if canal["tipo"] == "telegram":
+            await _reconciliar_webhook_telegram(canal)
+            continue
+        if canal["tipo"] != "whatsapp" or not canal["config"].get("instance_name"):
+            continue
+        if not settings.has_evolution:
+            log.warning("Canal WhatsApp %s sem Evolution configurada: webhook não conferido.", canal["id"])
+            continue
+        nome = canal["config"]["instance_name"]
+        try:
+            atual = (await evolution.obter_webhook(url, key, nome)).get("url", "")
+            esperado = _url_de_webhook(canal)
+        except Exception as e:
+            log.warning("Não consegui ler o webhook de %s: %s", nome, e)
+            continue
+        if atual == esperado:
+            continue
+        try:
+            await evolution.atualizar_webhook(url, key, nome, esperado)
+            log.info("Webhook de %s atualizado para a URL com segredo.", nome)
+        except Exception as e:
+            log.warning("Falha ao atualizar o webhook de %s: %s", nome, e)
+
+
+async def _reconciliar_webhook_telegram(canal: dict) -> None:
+    """Se a URL registrada no Telegram não for a esperada, reconfigura sozinho.
+
+    Sem isto, trocar a BASE_URL, o segredo do canal ou implantar uma versão nova
+    da Edge Function deixava o bot mudo até alguém clicar em "registrar webhook".
+    """
+    token = canal["config"].get("token")
+    if not token:
+        return
+    try:
+        esperado = _url_de_webhook(canal)
+    except HTTPException:
+        return
+    try:
+        info = await telegram.info_webhook(token)
+        if info.get("url") == esperado:
+            return
+        await telegram.definir_webhook(token, esperado)
+        log.info("Webhook do Telegram do canal %s reconferido.", canal["id"])
+    except Exception as e:
+        log.warning("Falha ao reconferir o webhook do Telegram do canal %s: %s", canal["id"], e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.has_db:
@@ -490,11 +583,20 @@ async def lifespan(app: FastAPI):
         # Só há tarefa de fundo nos canais NÃO OFICIAIS. Os oficiais são
         # 100% push (webhook), então nada de polling/keepalive: é isso que
         # permite ao Render passar o mês hibernando.
+        try:
+            await _reconciliar_webhooks()
+        except Exception as e:
+            log.warning("Falha ao reconciliar webhooks da Evolution: %s", e)
         await _reconciliar_tarefas_de_fundo()
     yield
     for tarefa in (_poller_task, _keepalive_task, _worker_caixa_task, _sync_task):
         if tarefa:
             tarefa.cancel()
+    # Cancelar não basta: sem await a task fica órfã e o Uvicorn mata o
+    # processo no meio de uma escrita no banco.
+    pendentes = [t for t in (_poller_task, _keepalive_task, _worker_caixa_task, _sync_task) if t]
+    if pendentes:
+        await asyncio.gather(*pendentes, return_exceptions=True)
     await close_pool()
 
 
@@ -508,6 +610,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rotas publicas: a pagina (o shell vazio), o health check usado pelo Render e
+# pela edge function para acordar o app, e os webhooks (que tem segredo proprio
+# na propria rota, checked la dentro).
+_ROTAS_PUBLICAS = ("/", "/health")
+
+
+@app.middleware("http")
+async def exigir_admin(request: Request, call_next):
+    """Proteção OPCIONAL do painel, por token (sem login de usuário).
+
+    Padrão: ADMIN_TOKEN vazio => API aberta, que é o que foi pedido. Se você
+    definir um ADMIN_TOKEN no servidor, tudo que não for rota pública/webhook
+    passa a exigir o header X-Admin-Token (é só colar no campo "Token" do
+    painel, sem conta/senha).
+
+    Mesmo no modo aberto os segredos nunca voltam ao navegador: token, sessionid,
+    access_token e app_secret saem mascarados por _canal_publico.
+    """
+    caminho = request.url.path
+    if caminho in _ROTAS_PUBLICAS or caminho.startswith("/webhook/"):
+        return await call_next(request)
+    # O preflight do navegador (GitHub Pages -> API) não leva o X-Admin-Token.
+    # Se fosse barrado aqui, o CORS nem responderia e a página ficaria muda.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if not settings.has_admin:
+        return await call_next(request)
+    if not _secret_igual(request.headers.get("x-admin-token", ""), settings.admin_token):
+        return JSONResponse({"detail": "Token de acesso inválido ou ausente."}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)
@@ -528,7 +661,9 @@ async def health():
 async def webhook_telegram(canal_id: int, secret: str, request: Request):
     payload = await request.json()
     canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "telegram" or canal["config"].get("secret") != secret:
+    if not canal or canal["tipo"] != "telegram":
+        return JSONResponse({"ok": False}, status_code=404)
+    if not _secret_igual(secret, canal["config"].get("secret", "")):
         return JSONResponse({"ok": False}, status_code=404)
 
     texto, chat_id = telegram.extrair_mensagem(payload)
@@ -548,14 +683,16 @@ def _norm_evento(v: str | None) -> str:
     return (v or "").upper().replace(".", "_")
 
 
-@app.post("/webhook/evolution/{canal_id}")
-async def webhook_evolution(canal_id: int, request: Request):
+@app.post("/webhook/evolution/{canal_id}/{secret}")
+async def webhook_evolution(canal_id: int, secret: str, request: Request):
     payload = await request.json()
     canal = await repo.obter_canal(canal_id)
     if not canal or canal["tipo"] != "whatsapp":
         return JSONResponse({"ok": False}, status_code=404)
-
     cfg = canal["config"]
+    if not _secret_igual(secret, cfg.get("secret", "")):
+        return JSONResponse({"ok": False}, status_code=404)
+
     evento = _norm_evento(payload.get("event"))
 
     if evento == "QRCODE_UPDATED":
@@ -588,23 +725,41 @@ async def webhook_evolution(canal_id: int, request: Request):
 
 @app.post("/webhook/generico/{canal_id}/{secret}")
 async def webhook_generico(canal_id: int, secret: str, request: Request):
+    """Enfileira e devolve a resposta. O pedido NUNCA e perdido: mesmo expirado
+    o prazo de espera, a mensagem continua na caixa_entrada e o worker responde
+    depois. Antes, uma falha do Gemini aqui custava a mensagem do cliente."""
     if not settings.has_db:
         raise HTTPException(503, "Banco de dados não configurado.")
     canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "webhook" or canal["config"].get("secret") != secret:
+    if not canal or canal["tipo"] != "webhook":
+        return JSONResponse({"ok": False}, status_code=404)
+    if not _secret_igual(secret, canal["config"].get("secret", "")):
         return JSONResponse({"ok": False}, status_code=404)
 
     payload = await request.json()
-    texto = str(payload.get("text", "")).strip()
-    usuario = str(payload.get("user", "anonimo") or "anonimo")
-    if texto:
-        resposta = await _tratar_mensagem(canal, f"web:{usuario}", texto)
-        await repo.salvar_na_caixa(
-            canal_id, usuario, texto, origem="",
-            payload=payload, status="respondido", resposta=resposta or "",
-        )
-        return JSONResponse({"reply": resposta or ""})
-    return JSONResponse({"reply": ""})
+    # aceita text/texto e user/remetente: um payload com a outra grafia nao pode
+    # receber resposta vazia em silencio, que e a perda que a fila existe pra evitar
+    texto = str(payload.get("text") or payload.get("texto") or "").strip()
+    usuario = str(payload.get("user") or payload.get("remetente") or "anonimo").strip() or "anonimo"
+    if not texto:
+        return JSONResponse({"reply": ""})
+
+    # origem unica por requisicao: o indice unico (canal_id, origem) descartaria
+    # a segunda mensagem se duas requisições viessem com a origem vazia.
+    msg_id = await repo.salvar_na_caixa(
+        canal_id, usuario, texto, origem=f"web:{uuid.uuid4().hex}", payload=payload,
+    )
+    if msg_id is None:
+        return JSONResponse({"reply": "", "status": "duplicado"}, status_code=200)
+
+    item = await repo.aguardar_caixa(msg_id, timeout_s=WEBHOOK_GENERICO_ESPERA_SEG)
+    if item and item["status"] == "respondido":
+        # status sempre presente: quem chama precisa saber responder bem ou esperar
+        return JSONResponse({"reply": item["resposta"] or "", "status": "respondido"})
+    if item and item["ultimo_erro"]:
+        # Falhou agora, mas continua na fila: o worker tenta de novo.
+        return JSONResponse({"reply": "", "status": "na_fila", "erro": item["ultimo_erro"]}, status_code=202)
+    return JSONResponse({"reply": "", "status": "na_fila"}, status_code=202)
 
 
 # --------------------------------------------------------------------------
@@ -665,7 +820,7 @@ async def delete_agente(agente_id: int):
 
 @app.get("/api/agentes/{agente_id}/canais")
 async def get_canais(agente_id: int):
-    return await repo.listar_canais(agente_id, redigir=True)
+    return [_canal_publico(c) for c in await repo.listar_canais(agente_id)]
 
 
 @app.post("/api/agentes/{agente_id}/canais")
@@ -698,7 +853,7 @@ async def post_canal(agente_id: int, request: Request):
             canal["config"]["qr"] = qr
             canal["config"]["status"] = canal["config"].get("status", "scanning")
             await _reconciliar_tarefas_de_fundo()
-            return _publico(canal)
+            return _canal_publico(canal)
         except HTTPException:
             await repo.excluir_canal(canal["id"])
             raise
@@ -709,7 +864,7 @@ async def post_canal(agente_id: int, request: Request):
         config["webhook_url"] = _url_webhook_meta(tipo)
     canal = await repo.criar_canal(agente_id, tipo, nome, config)
     await _reconciliar_tarefas_de_fundo()
-    return _publico(canal)
+    return _canal_publico(canal)
 
 
 @app.put("/api/canais/{canal_id}")
@@ -737,10 +892,10 @@ async def put_canal(canal_id: int, request: Request):
         config.setdefault("qr", "")
     if tipo in TIPOS_CANAL_OFICIAL:
         config["webhook_url"] = _url_webhook_meta(tipo)
-    config["secret"] = atual["config"].get("secret", _gerar_secret())
+    config["secret"] = atual["config"].get("secret") or _gerar_secret()
     salvo = await repo.atualizar_canal(canal_id, nome, config, ativo)
     await _reconciliar_tarefas_de_fundo()
-    return _publico(salvo)
+    return _canal_publico(salvo)
 
 
 @app.delete("/api/canais/{canal_id}")
@@ -757,6 +912,13 @@ async def delete_canal(canal_id: int):
         except Exception as e:
             log.warning("Falha ao remover instância Evolution do canal %s: %s", canal_id, e)
     await _reconciliar_tarefas_de_fundo()
+    if canal["tipo"] == "instagram" and canal["config"].get("sessionid"):
+        try:
+            await repo.excluir_sessao_instagram(
+                instagram._chave(canal["config"]["sessionid"])
+            )
+        except Exception as e:
+            log.warning("Falha ao remover a sessão do Instagram do canal %s: %s", canal_id, e)
     return {"ok": True}
 
 
@@ -765,22 +927,27 @@ async def delete_canal(canal_id: int):
 # --------------------------------------------------------------------------
 
 def _url_de_webhook(canal: dict) -> str:
+    """URL publica do canal. Telegram e webhook generico carregam o segredo na
+    propria rota; o do Evolution tambem (antes so o id, e qualquer um achava)."""
     base = settings.base_url
     inbox = settings.supabase_functions_base
+    secret = canal["config"].get("secret", "")
     if canal["tipo"] == "telegram":
         if inbox:
-            return f"{inbox}/telegram/{canal['id']}/{canal['config'].get('secret')}"
+            return f"{inbox}/telegram/{canal['id']}/{secret}"
         if not base:
             raise HTTPException(400, "Configure a variável BASE_URL (ou SUPABASE_FUNCTIONS_BASE) no .env para gerar webhooks.")
-        return f"{base}/webhook/telegram/{canal['id']}/{canal['config'].get('secret')}"
+        return f"{base}/webhook/telegram/{canal['id']}/{secret}"
     if canal["tipo"] == "whatsapp":
         if inbox:
-            return f"{inbox}/evolution/{canal['id']}"
-        return f"{base}/webhook/evolution/{canal['id']}"
+            return f"{inbox}/evolution/{canal['id']}/{secret}"
+        if not base:
+            raise HTTPException(400, "Configure a variável BASE_URL no .env para gerar webhooks.")
+        return f"{base}/webhook/evolution/{canal['id']}/{secret}"
     if canal["tipo"] == "webhook":
         if not base:
             raise HTTPException(400, "Configure a variável BASE_URL no .env para gerar webhooks.")
-        return f"{base}/webhook/generico/{canal['id']}/{canal['config'].get('secret')}"
+        return f"{base}/webhook/generico/{canal['id']}/{secret}"
     return ""
 
 
@@ -815,15 +982,22 @@ def _evo_creds() -> tuple[str, str]:
 
 
 async def _conectar_whatsapp(canal: dict) -> str:
-    """Cria a instância na Evolution (ou usa a existente) e devolve o QR."""
+    """Garante a instância na Evolution (criando ou reapontando o webhook) e devolve o QR."""
     url, key = _evo_creds()
     nome = canal["config"].get("instance_name", "")
     if not nome:
         raise HTTPException(400, "Instância não definida para este canal.")
+    webhook_url = _url_de_webhook(canal)
     try:
-        await evolution.criar_instancia(url, key, nome, _url_de_webhook(canal))
+        await evolution.criar_instancia(url, key, nome, webhook_url)
     except Exception as e:
-        log.info("Criar instância %s: %s", nome, e)
+        log.info("Instância %s já existe (%s); reapontando o webhook.", nome, str(e)[:120])
+    # Sempre reaponta: é o que coloca o segredo do canal na URL. Sem isso, uma
+    # instância já criada continuaria chamando a URL antiga e pararia de entregar.
+    try:
+        await evolution.atualizar_webhook(url, key, nome, webhook_url)
+    except Exception as e:
+        log.warning("Não consegui reapontar o webhook de %s: %s", nome, e)
     await repo.patch_canal_config(canal["id"], "status", "scanning")
     return await _buscar_qr(canal)
 

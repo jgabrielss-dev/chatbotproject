@@ -8,6 +8,10 @@ from pathlib import Path
 
 from instagrapi import Client
 
+from app import config, repositories as repo
+
+settings = config.settings
+
 log = logging.getLogger("instagram")
 
 # Fora de app/ de propósito: o Render monta o app em disco efêmero, então a
@@ -56,7 +60,7 @@ def _arquivo_sessao(sessionid: str) -> Path:
     return DATA_DIR / f"ig_session_{marca}.json"
 
 
-def _login_sync(sessionid: str) -> Client:
+def _login_sync(sessionid: str, dados_banco: dict | None = None) -> Client:
     if not sessionid:
         raise ValueError(
             "Instagram nao-oficial exige 'sessionid'. "
@@ -66,7 +70,17 @@ def _login_sync(sessionid: str) -> Client:
     client = Client()
     client.delay_range = [1, 3]
     arquivo = _arquivo_sessao(sessionid)
-    if arquivo.exists():
+    restaurada = False
+    # A sessão vive no Postgres (o disco do Render é efêmero). Sem isto, cada
+    # cold start refazia login_by_sessionid e o Instagram acabava respondendo
+    # "out of date" / bloqueando a conta.
+    if dados_banco:
+        try:
+            client.set_settings(dados_banco)
+            restaurada = True
+        except Exception as e:
+            log.warning("Sessão do Instagram no banco inválida, usando o disco: %s", e)
+    if not restaurada and arquivo.exists():
         try:
             client.load_settings(arquivo)
         except Exception as e:
@@ -88,25 +102,42 @@ def _login_sync(sessionid: str) -> Client:
     return client
 
 
-async def _com_lock(chave: str, func, *args):
-    lock = _locks.setdefault(chave, asyncio.Lock())
-    async with lock:
-        return await asyncio.to_thread(func, *args)
+async def _salvar_sessao(chave: str, client: Client) -> None:
+    """Persiste a sessão no Postgres (fonte da verdade) e no disco (cache)."""
+    dados = client.settings
+    if settings.has_db:
+        try:
+            await repo.salvar_sessao_instagram(chave, dados)
+        except Exception as e:
+            log.warning("Não consegui salvar a sessão do Instagram no banco: %s", e)
+    try:
+        client.dump_settings(DATA_DIR / f"ig_session_{chave.split(':', 1)[-1]}.json")
+    except Exception as e:
+        log.warning("Não consegui salvar a sessão do Instagram em disco: %s", e)
 
 
-def _cliente_sync(sessionid: str) -> Client:
-    """Cliente logado SEM adquirir lock (uso interno dentro de _com_lock)."""
-    chave = _chave(sessionid)
+async def _obter_cliente_locked(chave: str, sessionid: str) -> Client:
+    """Cliente logado, com sessão restaurada do Postgres. Exige o lock adquirido."""
     if chave in _clientes:
         return _clientes[chave]
-    _clientes[chave] = _login_sync(sessionid)
-    return _clientes[chave]
+    dados = None
+    if settings.has_db:
+        try:
+            dados = await repo.obter_sessao_instagram(chave)
+        except Exception as e:
+            log.warning("Falha ao ler a sessão do Instagram do banco: %s", e)
+    client = await asyncio.to_thread(_login_sync, sessionid, dados)
+    _clientes[chave] = client
+    await _salvar_sessao(chave, client)
+    return client
 
 
 async def obter_cliente(sessionid: str) -> Client:
-    """Garante um cliente logado (com cache em disco)."""
+    """Garante um cliente logado (cache em memória, sessão no Postgres)."""
     chave = _chave(sessionid)
-    return await _com_lock(chave, _cliente_sync, sessionid)
+    lock = _locks.setdefault(chave, asyncio.Lock())
+    async with lock:
+        return await _obter_cliente_locked(chave, sessionid)
 
 
 def _thread_key(thread) -> str:
@@ -125,74 +156,85 @@ async def coletar_novas(
 ) -> tuple[list[tuple[str, str, str]], dict]:
     """Retorna (mensagens novas, vistos atualizado).
     (thread_id, msg_id, texto) - apenas mensagens de outras pessoas."""
-
-    def _coletar() -> tuple[list[tuple[str, str, str]], dict]:
-        client = _cliente_sync(sessionid)
-        vistos = dict(ja_vistos or {})
-        novos: list[tuple[str, str, str]] = []
-
-        def _registrar(thread) -> None:
-            # `vistos` e a fonte de verdade da deduplicacao, entao a mesma
-            # thread vista na caixa de pendentes e depois na geral nao gera
-            # mensagem repetida.
-            thread_id = _thread_key(thread)
-            if not thread_id:
-                return
-            processados = set(vistos.get(thread_id, []))
-            for msg in reversed(thread.messages or []):
-                if getattr(msg, "is_sent_by_viewer", False):
-                    continue
-                if str(msg.user_id) == str(client.user_id):
-                    continue
-                if not msg.text:
-                    continue
-                if msg.id in processados:
-                    continue
-                processados.add(msg.id)
-                novos.append((thread_id, str(msg.id), msg.text))
-            vistos[thread_id] = list(processados)
-
-        # 1) Pedidos de contato: aprovar imediatamente.
-        #    Os métodos são do próprio Client (`client.direct_*`). Não existe um
-        #    namespace `client.direct_messages`: esse nome é o método que lê as
-        #    mensagens de UMA thread (client.direct_messages(thread_id)).
-        try:
-            pendentes = client.direct_pending_inbox(amount=20)
-        except Exception as e:
-            log.warning("direct_pending_inbox falhou: %s", e)
-            pendentes = []
-        for thread in pendentes:
-            thread_id = _thread_key(thread)
-            try:
-                ok = client.direct_pending_approve(int(thread_id))
-                log.info("Pedido de contato %s aprovado=%s", thread_id, ok)
-            except Exception as e:
-                log.warning("Falha ao aprovar pedido de contato %s: %s", thread_id, e)
-            # A mensagem do solicitante e registrada de todo modo, mesmo se a
-            # aprovacao falhar, para nao perder o primeiro contato.
-            _registrar(thread)
-
-        # 2) Caixa principal, que passa a conter as threads recem-aprovadas.
-        try:
-            threads = client.direct_threads(amount=20, thread_message_limit=20)
-        except Exception as e:
-            log.warning("direct_threads falhou: %s", e)
-            threads = []
-        for thread in threads:
-            _registrar(thread)
-
+    chave = _chave(sessionid)
+    lock = _locks.setdefault(chave, asyncio.Lock())
+    async with lock:
+        client = await _obter_cliente_locked(chave, sessionid)
+        novos, vistos = await asyncio.to_thread(_coletar_sync, client, ja_vistos)
+        # Navegar renova cookies: só agora vale persistir de novo.
+        await _salvar_sessao(chave, client)
         return novos, vistos
 
-    return await _com_lock(_chave(sessionid), _coletar)
+
+def _coletar_sync(client: Client, ja_vistos: dict) -> tuple[list[tuple[str, str, str]], dict]:
+    vistos = dict(ja_vistos or {})
+    novos: list[tuple[str, str, str]] = []
+
+    def _registrar(thread) -> None:
+        # `vistos` e a fonte de verdade da deduplicacao, entao a mesma
+        # thread vista na caixa de pendentes e depois na geral nao gera
+        # mensagem repetida.
+        thread_id = _thread_key(thread)
+        if not thread_id:
+            return
+        processados = set(vistos.get(thread_id, []))
+        for msg in reversed(thread.messages or []):
+            if getattr(msg, "is_sent_by_viewer", False):
+                continue
+            if str(msg.user_id) == str(client.user_id):
+                continue
+            if not msg.text:
+                continue
+            if msg.id in processados:
+                continue
+            processados.add(msg.id)
+            novos.append((thread_id, str(msg.id), msg.text))
+        vistos[thread_id] = list(processados)
+
+    # 1) Pedidos de contato: aprovar imediatamente.
+    #    Os métodos são do próprio Client (`client.direct_*`). Não existe um
+    #    namespace `client.direct_messages`: esse nome é o método que lê as
+    #    mensagens de UMA thread (client.direct_messages(thread_id)).
+    try:
+        pendentes = client.direct_pending_inbox(amount=20)
+    except Exception as e:
+        log.warning("direct_pending_inbox falhou: %s", e)
+        pendentes = []
+    for thread in pendentes:
+        thread_id = _thread_key(thread)
+        try:
+            ok = client.direct_pending_approve(int(thread_id))
+            log.info("Pedido de contato %s aprovado=%s", thread_id, ok)
+        except Exception as e:
+            log.warning("Falha ao aprovar pedido de contato %s: %s", thread_id, e)
+        # A mensagem do solicitante e registrada de todo modo, mesmo se a
+        # aprovacao falhar, para nao perder o primeiro contato.
+        _registrar(thread)
+
+    # 2) Caixa principal, que passa a conter as threads recem-aprovadas.
+    try:
+        threads = client.direct_threads(amount=20, thread_message_limit=20)
+    except Exception as e:
+        log.warning("direct_threads falhou: %s", e)
+        threads = []
+    for thread in threads:
+        _registrar(thread)
+
+    return novos, vistos
+
+
+def _enviar_sync(client: Client, thread_id: str, texto: str) -> None:
+    try:
+        client.direct_send(texto, thread_ids=[int(thread_id)])
+    except Exception as e:
+        log.error("Falha ao enviar DM Instagram: %s", e)
+        raise
 
 
 async def enviar_mensagem(sessionid: str, thread_id: str, texto: str) -> None:
-    def _enviar() -> None:
-        client = _cliente_sync(sessionid)
-        try:
-            client.direct_send(texto, thread_ids=[int(thread_id)])
-        except Exception as e:
-            log.error("Falha ao enviar DM Instagram: %s", e)
-            raise
-
-    await _com_lock(_chave(sessionid), _enviar)
+    chave = _chave(sessionid)
+    lock = _locks.setdefault(chave, asyncio.Lock())
+    async with lock:
+        client = await _obter_cliente_locked(chave, sessionid)
+        await asyncio.to_thread(_enviar_sync, client, thread_id, texto)
+        await _salvar_sessao(chave, client)

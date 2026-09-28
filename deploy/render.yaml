@@ -20,3 +20,7 @@ services:
       # Render hiberna entre os pings e economiza as 750h/mês do plano gratis.
       - key: EVOLUTION_KEEPALIVE_SEG
         value: "1800"
+      # OPCAO. Se definido, todas as rotas /api/* exigem o header X-Admin-Token.
+      # Se ficar VAZIO o painel fica aberto (sem login), que e o padrao atual.
+      - key: ADMIN_TOKEN
+        value: ""

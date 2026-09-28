@@ -96,20 +96,74 @@
     aside { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
     .grid-2 { grid-template-columns: 1fr; }
   }
+
+  /* ---- fila / problemas ---- */
+  .saude { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saude .badge { font-size: 12px; }
+  .problemas { margin-top: 12px; border-top: 1px solid var(--border); }
+  .prob {
+    display: flex; align-items: center; gap: 8px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px; flex-wrap: wrap;
+  }
+  .prob:last-child { border-bottom: none; }
+  .prob .txt { flex: 1; min-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .prob .erro {
+    display: none; width: 100%; margin-top: 6px; padding: 8px 10px;
+    background: #12141c; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); font-size: 11px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+  }
+  .prob.aberta .erro { display: block; }
+  .btn.tiny { padding: 2px 7px; font-size: 11px; }
+  .vazio { color: var(--muted); font-size: 12px; padding: 10px 0; }
+
+  /* ---- portao de acesso ---- */
+  #gate {
+    position: fixed; inset: 0; background: var(--bg); z-index: 1000;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #gate .box { width: 100%; max-width: 360px; }
 </style>
 </head>
 <body>
 <div id="toasts"></div>
 
+<div id="gate" class="hidden">
+  <div class="box card">
+    <h2>Acesso ao painel (opcional)</h2>
+    <p class="muted">O painel está <strong>aberto</strong>: não é preciso token. Preencha só se você tiver definido um <code>ADMIN_TOKEN</code> no servidor.</p>
+    <input type="password" id="gateToken" placeholder="deixe em branco para abrir sem token" autocomplete="current-password">
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="gateEntrar">Abrir painel</button>
+      <button class="btn" id="gateSair">Limpar token</button>
+    </div>
+    <p class="aviso" id="gateErro" style="margin-top:10px"></p>
+  </div>
+</div>
+
 <aside>
   <h1>Chatbot Project</h1>
   <p class="sub">Gestão de agentes e canais</p>
   <button class="btn primary" id="btnNovo" style="width:100%">+ Novo agente</button>
+  <div class="row" style="margin-top:8px">
+    <button class="btn sm" id="btnToken" style="flex:1" title="Só é necessário se você tiver definido um ADMIN_TOKEN no servidor">Token de acesso</button>
+  </div>
   <div id="listaAgentes" style="margin-top:14px"></div>
   <p class="aviso">Sem cobrança nesta fase. Todos os agentes usam a mesma chave Gemini configurada no servidor.</p>
 </aside>
 
 <main>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Fila de mensagens</h2>
+      <div class="row">
+        <span class="saude" id="filaResumo">carregando…</span>
+        <button class="btn sm" id="btnAtualizarFila">Atualizar</button>
+      </div>
+    </div>
+    <div id="filaProblemas" class="problemas"></div>
+  </div>
+
   <div id="agenteForm" class="card hidden">
     <h2 id="formTitle">Novo agente</h2>
     <label>Nome</label>
@@ -181,12 +235,76 @@ function toast(msg, tipo = "info") {
 
 // Quando a pagina e servida pelo FastAPI a API esta na mesma origem ("").
 // No GitHub Pages ela e estatica, entao apontamos para o backend no Render.
-const API_BASE = /\.github\.io$/i.test(location.hostname)
-  ? "https://chatbotproject-1-l9zr.onrender.com"
-  : "";
+// Se o index.html for aberto direto do disco (file://) nao existe origem para
+// "/api/..." resolver, e o fetch falha com "Failed to fetch": nesse caso
+// usamos a URL do Render e avisamos na tela.
+const API_RENDER = "https://chatbotproject-1-l9zr.onrender.com";
+const ABRINDO_DO_DISCO = location.protocol === "file:";
+const API_BASE = /\.github\.io$/i.test(location.hostname) || ABRINDO_DO_DISCO ? API_RENDER : "";
 
-const api = async (url, opts = {}) => {
-  const r = await fetch(API_BASE + url, { headers: { "Content-Type": "application/json" }, ...opts });
+// ---- acesso ao painel -------------------------------------------------
+// O servidor fica ABERTO por padrão (sem login, como pedido). Se você definir
+// um ADMIN_TOKEN lá, o servidor passa a exigir o header X-Admin-Token e o
+// painel pede o token uma única vez. Os segredos dos canais (token do bot,
+// sessionid, access_token) nunca voltam para o navegador de qualquer forma.
+const CHAVE_TOKEN = "chatbotproject.adminToken";
+let adminToken = localStorage.getItem(CHAVE_TOKEN) || "";
+
+const gate = $("gate"), gateToken = $("gateToken"), gateErro = $("gateErro");
+
+function mostrarGate(erro) {
+  gate.classList.remove("hidden");
+  gateErro.textContent = erro || "";
+  gateErro.style.color = erro ? "var(--danger)" : "";
+  gateToken.value = adminToken;
+  setTimeout(() => gateToken.focus(), 0);
+}
+
+function esconderGate() { gate.classList.add("hidden"); }
+
+$("gateEntrar").onclick = () => {
+  adminToken = gateToken.value.trim();
+  if (adminToken) localStorage.setItem(CHAVE_TOKEN, adminToken);
+  else localStorage.removeItem(CHAVE_TOKEN);
+  esconderGate();
+  carregarAgentes();
+  atualizarFila();
+};
+$("gateSair").onclick = () => {
+  localStorage.removeItem(CHAVE_TOKEN);
+  adminToken = "";
+  mostrarGate();
+  gateErro.textContent = "";
+};
+gateToken.addEventListener("keydown", (e) => { if (e.key === "Enter") $("gateEntrar").click(); });
+$("btnToken").onclick = () => mostrarGate();
+
+const api = async (url, opts = {}, tentativa = 0) => {
+  let r;
+  try {
+    r = await fetch(API_BASE + url, {
+      ...opts,
+      headers: { "Content-Type": "application/json", "X-Admin-Token": adminToken, ...(opts.headers || {}) },
+    });
+  } catch (e) {
+    // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda está
+    // acordando do hibernamento do plano grátis. Uma retentativa resolve a
+    // esmagadora maioria dos casos.
+    if (tentativa < 2) {
+      if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
+      await new Promise((r2) => setTimeout(r2, 3000));
+      return api(url, opts, tentativa + 1);
+    }
+    throw new Error(
+      ABRINDO_DO_DISCO
+        ? "Não foi possível falar com a API. Abra o painel pelo endereço do Render em vez de abrir o arquivo do disco."
+        : "Não foi possível falar com a API (" + API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto."
+    );
+  }
+  if (r.status === 401) {
+    mostrarGate("Token inválido ou ausente. Cole o ADMIN_TOKEN do servidor (só se você tiver definido um).");
+    throw new Error("não autorizado");
+  }
   if (!r.ok) {
     let msg = r.statusText;
     try { const j = await r.json(); msg = j.detail || JSON.stringify(j); } catch (e) { try { msg = await r.text(); } catch (e2) {} }
@@ -470,6 +588,83 @@ async function testar(canalId, btn) {
   btn.disabled = false; btn.textContent = o;
 }
 
+/* ---------------- Fila de mensagens ---------------- */
+// Visão limpa por padrão: só os contadores. A mensagem que está presa aparece
+// como uma linha curta e o erro cru (stack do Gemini, erro da Evolution) só
+// aparece quando o usuário clica em "detalhes".
+const ROTULO_STATUS = {
+  pendente: ["na fila", "tipo"],
+  processando: ["processando", "on"],
+  erro: ["com erro", "err"],
+  respondido: ["respondidas", "on"],
+  sem_resposta: ["sem resposta", "off"],
+};
+
+function quando(iso) {
+  if (!iso) return "";
+  const seg = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seg < 60) return "agora";
+  if (seg < 3600) return Math.round(seg / 60) + "min";
+  if (seg < 86400) return Math.round(seg / 3600) + "h";
+  return Math.round(seg / 86400) + "d";
+}
+
+function renderFila(dados) {
+  const c = dados.contagem || {};
+  const partes = [];
+  for (const [chave, rot] of Object.entries(ROTULO_STATUS)) {
+    if (!c[chave]) continue;
+    const [texto, cor] = rot;
+    partes.push(`<span class="badge ${cor}">${c[chave]} ${texto}</span>`);
+  }
+  $("filaResumo").innerHTML = partes.join("") || '<span class="badge on">fila vazia</span>';
+
+  const problemas = dados.problemas || [];
+  const el = $("filaProblemas");
+  el.innerHTML = "";
+  if (!problemas.length) {
+    el.innerHTML = '<p class="vazio">Nada pendente. Todas as mensagens recebidas foram respondidas.</p>';
+    return;
+  }
+  for (const p of problemas) {
+    const [texto, cor] = ROTULO_STATUS[p.status] || [p.status, ""];
+    const div = document.createElement("div");
+    div.className = "prob";
+    const orig = p.origem || "";
+    div.innerHTML = `
+      <span class="badge ${cor}">${esc(texto)}</span>
+      <span class="txt">${esc(p.canal_nome || p.canal_id)} &middot; ${esc(p.remetente || "")}</span>
+      ${p.tentativas > 1 ? `<span class="badge">${p.tentativas}x</span>` : ""}
+      <span class="badge">${esc(quando(p.proxima_tentativa || p.criado_em))}</span>
+      ${p.ultimo_erro ? '<button class="btn sm tiny" data-detalhe>detalhes</button>' : ""}
+      <div class="erro"></div>`;
+    const btn = div.querySelector("[data-detalhe]");
+    if (btn) {
+      const bruto = div.querySelector(".erro");
+      bruto.textContent = p.ultimo_erro;
+      btn.onclick = () => {
+        const aberta = div.classList.toggle("aberta");
+        bruto.style.display = aberta ? "block" : "none";
+        btn.textContent = aberta ? "ocultar" : "detalhes";
+      };
+    }
+    el.appendChild(div);
+  }
+}
+
+let timerFila = null;
+async function atualizarFila() {
+  try {
+    renderFila(await api("/api/caixa"));
+  } catch (e) {
+    if (e.message !== "não autorizado") {
+      $("filaResumo").innerHTML = '<span class="badge err">fila indisponível</span>';
+    }
+  }
+}
+
+$("btnAtualizarFila").onclick = atualizarFila;
+
 /* ---------------- Formulários de canal ---------------- */
 
 function camposPorTipo(tipo, config = {}, novo = false) {
@@ -477,10 +672,30 @@ function camposPorTipo(tipo, config = {}, novo = false) {
   const val = (v) => (novo ? "" : esc(v || ""));
   if (tipo === "telegram") return `
     <label>Token do bot (BotFather)</label>
-    <input type="password" data-config="token" value="${val(config.token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">`;
+    <input type="password" data-config="token" value="${val(config.token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Fale com <code>@BotFather</code> no Telegram e mande <code>/newbot</code>.</li>
+      <li>Dê um nome e um username terminados em <code>bot</code>.</li>
+      <li>Copie o token (números e <code>:</code>) e cole acima.</li>
+      <li>Salve o canal e clique em <strong>registrar webhook</strong>: é o passo que faz a
+          mensagem chegar. A URL já carrega o segredo do canal — não edite à mão.</li>
+    </ol>
+    <p class="muted">Se trocar o token depois, clique em "registrar webhook" de novo.</p>`;
   if (tipo === "whatsapp") return `
     <p class="muted">Nenhuma credencial necessária — a plataforma já possui a Evolution configurada.
-      Uma instância nova será criada e o QR Code exibido em seguida.</p>`;
+      Uma instância nova é criada e o QR Code aparece logo abaixo do nome do canal.</p>
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Salve o canal com um nome qualquer (ex.: <code>WhatsApp Principal</code>).</li>
+      <li>Abra o WhatsApp no celular &rarr; <em>Aparelhos conectados</em> &rarr; <em>Conectar um
+          aparelho</em> e escaneie o QR que aparece na tela.</li>
+      <li>Se o QR vencer, use o botão de reconectar — o código se renova sozinho.</li>
+      <li>A URL de webhook da instância é conferida e corrigida a cada ~10 min, então não
+          precisa registrar nada na mão.</li>
+    </ol>
+    <p class="muted">É o canal <strong>não oficial</strong> (Baileys): funciona sem chip e
+      sem custo, mas viola os termos do WhatsApp e pode banir o número.</p>`;
   if (tipo === "instagram") return `
     <div class="warn"><strong>Método NÃO-oficial (instagrapi).</strong> Ative apenas com <code>sessionid</code>:
     o login por senha foi desativado pelo próprio Instagram (exigência de atestação de app), e esta API
@@ -502,26 +717,61 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     <div class="grid-2">
       <div><label>Phone Number ID</label><input type="text" data-config="phone_number_id" value="${val(config.phone_number_id)}"
         placeholder="${novo ? "123456789012345" : ""}"></div>
-      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"
+        placeholder="${novo ? "uma senha sua" : ""}"></div>
     </div>
     <label>Access token permanente</label>
     <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
     <label>app secret (obrigatório — valida a assinatura do webhook)</label>
     <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
-    <p class="muted" style="margin-top:4px">No painel da Meta, aponte o webhook para a URL exibida após salvar e assine o campo <code>messages</code>.</p>`;
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li><code>developers.facebook.com</code> &rarr; seu app &rarr; <em>WhatsApp</em> &rarr;
+          <em>API Setup</em>. Copie o <strong>Phone Number ID</strong> e o
+          <strong>Access token</strong> (gere um permanente em <em>WhatsApp &gt; Configuration</em>).</li>
+      <li><em>Configurações &gt; Básico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li>Escolha um <strong>verify_token</strong> (pode ser qualquer texto seu) e salve o canal.</li>
+      <li>Copie a <strong>URL de webhook</strong> exibida no card do canal e cole em
+          <em>Configurações &gt; Webhooks</em>; assine o campo <code>messages</code>.</li>
+      <li>Clique em <strong>Verificar e salvar</strong> no painel da Meta. Sem o
+          <code>app_secret</code> a assinatura não fecha e o canal rejeita tudo.</li>
+    </ol>
+    <p class="muted">O número precisa estar na conta do app, e o webhook é chamado pela Meta
+      direto na Edge Function — por isso não há keepalive e o Render pode hibernar.</p>`;
   if (tipo === "instagram_oficial") return `
     <div class="aviso-ok"><strong>Método OFICIAL</strong> (Instagram Messaging API). Webhook direto, sem polling.</div>
     <div class="grid-2">
       <div><label>Instagram Business Account ID</label><input type="text" data-config="ig_user_id" value="${val(config.ig_user_id)}"
         placeholder="${novo ? "17841400..." : ""}"></div>
-      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"
+        placeholder="${novo ? "uma senha sua" : ""}"></div>
     </div>
     <label>Access token permanente</label>
     <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
     <label>app secret (obrigatório — valida a assinatura do webhook)</label>
     <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
-    <p class="muted" style="margin-top:4px">A conta precisa estar em um Business portfolio e vinculada a um app da Meta.</p>`;
-  if (tipo === "webhook") return `<p class="muted">Nenhuma credencial necessária. Uma URL com segredo será gerada automaticamente.</p>`;
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>A conta precisa ser <strong>Business/Creator</strong> e estar num portfolio da Meta
+          ligado a um app.</li>
+      <li><em>Instagram &gt; API Setup</em> &rarr; copie o <strong>Instagram Business Account ID</strong>
+          e o <strong>Access token</strong> (gere permanente em <em>Instagram &gt; Configuration</em>).</li>
+      <li><em>Configurações &gt; Básico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li>Escolha um <strong>verify_token</strong>, salve o canal e cole a <strong>URL de webhook</strong>
+          exibida no card em <em>Configurações &gt; Webhooks</em>, assinando <code>messages</code>.</li>
+      <li>No perfil do Instagram, toque no botão de mensagem e confirme que a conta pode
+          receber mensagens (a Meta exige isso para liberar o Messaging API).</li>
+    </ol>`;
+  if (tipo === "webhook") return `
+    <p class="muted">Nenhuma credencial necessária. Salve o canal e a URL com o segredo é gerada automaticamente.</p>
+    <p class="muted" style="margin-top:6px"><strong>Como chamar (a resposta vem no mesmo request):</strong></p>
+    <pre class="mono" style="background:#111;color:#eee;padding:10px;border-radius:8px;overflow:auto">&nbsp;curl -X POST "URL_DO_CANAL" \\
+&nbsp;  -H "Content-Type: application/json" \\
+&nbsp;  -d '{"user":"joao","text":"oi, quero um orcamento"}'</pre>
+    <p class="muted">A resposta vem em <code>{"reply":"...","status":"respondido"}</code>. Se a IA demorar
+      mais que ~30 s, o retorno é <code>202 {"status":"na_fila"}</code> e a mensagem <strong>não é perdida</strong>:
+      o worker responde depois, com retry automático. Use <code>text</code> ou <code>texto</code>, e
+      <code>user</code> ou <code>remetente</code> — todas as grafias são aceitas.</p>`;
   return "";
 }
 
@@ -609,7 +859,16 @@ $("btnNovoCanal").onclick = () => {
   mostrarFormNovoCanal();
 };
 
-carregarAgentes();
+// ---------- partida ----------
+// O painel abre direto, sem token. Se o servidor exigir um (ADMIN_TOKEN
+// configurado), a resposta 401 mostra a caixa de token sozinha.
+esconderGate();
+carregarAgentes().catch(() => {});
+atualizarFila();
+timerFila = setInterval(atualizarFila, 15000);
+if (ABRINDO_DO_DISCO) {
+  toast("Você abriu o arquivo do disco: a API está em " + API_RENDER + ". Melhor usar o endereço do servidor.", "err");
+}
 </script>
 </body>
 </html>

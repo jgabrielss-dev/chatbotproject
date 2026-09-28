@@ -196,7 +196,6 @@ asyncio.run(_tarefas())
 # --------------------------------------------------------------------------
 print("\n== painel: o form de Instagram nao pede mais usuario/senha ==")
 html = (ROOT / "index.html").read_text(encoding="utf-8")
-
 # O login por senha foi desativado pelo Instagram. Se sobrar referencia a
 # usuario/senha na validacao do botao "Criar canal", o usuario fica preso
 # preenchendo um campo que nem existe mais na tela.
@@ -211,6 +210,122 @@ check("formulario do Instagram so tem o campo sessionid",
       'data-config="sessionid"' in bloco and "data-config=" not in bloco.replace(
           'data-config="sessionid"', ""),
       bloco.strip()[:80])
+
+# --------------------------------------------------------------------------
+print("\n== painel aberto (sem login) e conexao resiliente ==")
+check("nao existe rota /admin nem login no painel", "/admin" not in html)
+check("o token e opcional: o gate comeca escondido",
+      '<div id="gate" class="hidden">' in html)
+check("abre o painel mesmo sem token (nao chama mostrarGate na partida)",
+      "esconderGate();\ncarregarAgentes()" in html)
+check("'Failed to fetch' virou retentativa automatica",
+      "tentativa < 2" in html and "api(url, opts, tentativa + 1)" in html)
+check("abrir o index do disco aponta para a API do Render",
+      'location.protocol === "file:"' in html and "API_RENDER" in html)
+check("botao para informar token existe", 'id="btnToken"' in html)
+
+# --------------------------------------------------------------------------
+print("\n== acesso a API: token opcional, 401 so se configurado ==")
+
+
+def _chamar_api(token: str | None, headers: dict | None = None):
+    """Chama a API pelo ASGI, com o token do servidor escolhido em tempo de teste."""
+    from fastapi.testclient import TestClient
+
+    antigo = main_mod.settings.admin_token
+    object.__setattr__(main_mod.settings, "admin_token", token or "")
+    try:
+        with TestClient(main_mod.app) as c:
+            return c.get("/api/agentes", headers=headers or {})
+    finally:
+        object.__setattr__(main_mod.settings, "admin_token", antigo)
+
+
+try:
+    import fastapi.testclient  # noqa: F401
+
+    tem_testclient = True
+except Exception:
+    tem_testclient = False
+
+if tem_testclient:
+    r = _chamar_api(None)
+    check("sem ADMIN_TOKEN a API fica aberta (padrao pedido)", r.status_code == 200,
+          f"HTTP {r.status_code}")
+    r = _chamar_api("segredo-do-admin", {})
+    check("com ADMIN_TOKEN e sem header responde 401", r.status_code == 401,
+          f"HTTP {r.status_code}")
+    r = _chamar_api("segredo-do-admin", {"X-Admin-Token": "errado"})
+    check("com ADMIN_TOKEN e token errado responde 401", r.status_code == 401,
+          f"HTTP {r.status_code}")
+    r = _chamar_api("segredo-do-admin", {"X-Admin-Token": "segredo-do-admin"})
+    check("com ADMIN_TOKEN e token certo responde 200", r.status_code == 200,
+          f"HTTP {r.status_code}")
+    r = _chamar_api("segredo-do-admin", {})
+    check("o painel abre mesmo assim: o 401 so mostra o campo de token", r.status_code == 401)
+else:
+    print("  (pulado: fastapi.testclient nao instalado)")
+
+# --------------------------------------------------------------------------
+print("\n== o segredo do canal viaja na URL do webhook ==")
+
+
+async def _urls() -> None:
+    from app.main import _url_de_webhook
+
+    tg = {"id": 21, "tipo": "telegram", "config": {"secret": "abc123"}}
+    wa = {"id": 26, "tipo": "whatsapp", "config": {"secret": "def456", "instance_name": "ag7x"}}
+    wb = {"id": 16, "tipo": "webhook", "config": {"secret": "ghi789"}}
+    u_tg = _url_de_webhook(tg)
+    u_wa = _url_de_webhook(wa)
+    u_wb = _url_de_webhook(wb)
+    check("telegram usa a edge function com o segredo na rota",
+          u_tg.endswith("/telegram/21/abc123"), u_tg)
+    check("evolution usa a edge function com o segredo na rota",
+          u_wa.endswith("/evolution/26/def456"), u_wa)
+    check("webhook generico usa o app com o segredo na rota",
+          u_wb.endswith("/webhook/generico/16/ghi789"), u_wb)
+
+asyncio.run(_urls())
+
+edge = (ROOT / "supabase" / "functions" / "inbox" / "index.ts").read_text(encoding="utf-8")
+check("a edge function aceita /evolution/{id}/{secret}",
+      'rest[0] === "evolution" && rest[1] && rest[2]' in edge)
+check("a edge function aceita /telegram/{id}/{secret}",
+      'rest[0] === "telegram" && rest[1] && rest[2]' in edge)
+check("a edge function compara o segredo em tempo constante", "segredoIgual" in edge)
+check("a edge function tem as rotas oficiais da Meta",
+      'rest[0] === "meta"' in edge and "handleMeta" in edge)
+check("as rotas /meta nao exigem segredo (uso de app_secret na assinatura)",
+      'rest[0] === "meta" && (rest[1] === "whatsapp" || rest[1] === "instagram")' in edge)
+
+# --------------------------------------------------------------------------
+print("\n== fila: origem obrigatoria e indice nao parcial ==")
+sql = (ROOT / "supabase" / "migrations" / "0003_fila_e_sessao.sql").read_text(encoding="utf-8")
+check("migra processando_em", "processando_em" in sql)
+check("tira o indice parcial de origem", "DROP INDEX IF EXISTS uq_caixa_origem" in sql)
+check("cria o indice nao parcial", "CREATE UNIQUE INDEX IF NOT EXISTS uq_caixa_origem ON caixa_entrada (canal_id, origem)" in sql)
+check("origem vira NOT NULL", "ALTER COLUMN origem SET NOT NULL" in sql)
+check("guarda a sessao do Instagram no Postgres", "instagram_sessoes" in sql)
+check("protegge a sessao do Instagram com RLS", "ENABLE ROW LEVEL SECURITY" in sql)
+check("restaura os grants do schema public", "GRANT USAGE ON SCHEMA public" in sql)
+
+
+async def _origem_vazia() -> None:
+    try:
+        await repo.salvar_na_caixa(1, "x", "y", "")
+    except ValueError as e:
+        raise AssertionError(str(e)) from e
+    except Exception as e:  # sem banco: so queremos ver o erro de validacao
+        raise AssertionError(str(e)) from e
+
+
+try:
+    asyncio.run(_origem_vazia())
+    check("salvar_na_caixa recusa origem vazia", False, "aceitou")
+except AssertionError as e:
+    check("salvar_na_caixa recusa origem vazia", True, str(e)[:70])
+
 
 # --------------------------------------------------------------------------
 print("\n== resumo ==")

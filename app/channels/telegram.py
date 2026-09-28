@@ -37,6 +37,14 @@ async def info_bot(token: str) -> dict:
         return resp.json().get("result", {})
 
 
+async def info_webhook(token: str) -> dict:
+    """Webhook atualmente registrado no Telegram (inclui a url)."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(_url(token, "getWebhookInfo"))
+        resp.raise_for_status()
+        return resp.json().get("result", {})
+
+
 def extrair_mensagem(payload: dict) -> tuple[str | None, str | None]:
     """Retorna (conversa, chat_id) a partir do update do Telegram."""
     msg = payload.get("message") or {}
