@@ -9,6 +9,12 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      # Contas: o navegador fala com o GoTrue usando a anon key e a API valida
+      # o JWT. Sem as duas, tudo em /api/* responde 503 e o painel nao abre.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
       - key: BASE_URL
         sync: false
       # Base das Edge Functions do Supabase: e o webhook publico dos canais
@@ -20,7 +26,11 @@ services:
       # Render hiberna entre os pings e economiza as 750h/mês do plano gratis.
       - key: EVOLUTION_KEEPALIVE_SEG
         value: "1800"
-      # OPCAO. Se definido, todas as rotas /api/* exigem o header X-Admin-Token.
-      # Se ficar VAZIO o painel fica aberto (sem login), que e o padrao atual.
+      # Canais nao-oficiais sao restritos ao admin por padrao (ver
+      # app/main.py::_exigir_tipo_permitido). "1" libera para o cliente.
+      - key: CANAIS_NAO_OFICIAIS_PARA_USUARIOS
+        value: "0"
+      # SOMENTE para recuperar o acesso se o Supabase Auth cair. O login normal
+      # e a conta do Supabase; isto e um breaks-glass, entao fica vazio.
       - key: ADMIN_TOKEN
         value: ""

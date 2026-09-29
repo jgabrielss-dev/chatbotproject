@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meus chatbots · Chatbot Project</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* O style.css do admin tem grid com sidebar. Aqui a sidebar vira barra de
+     topo, porque o cliente navega por seções e não por uma lista de agentes. */
+  body.painel { grid-template-columns: 1fr; }
+  .topo { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+          border-bottom: 1px solid var(--borda); padding: 12px 0 14px; }
+  .topo h1 { font-size: 20px; margin: 0; }
+  .topo .spaco { flex: 1; }
+  .topo .eu { font-size: 13px; color: var(--txt2); }
+  .telas > section { display: none; }
+  .telas > section.on { display: block; }
+  .nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .num { border: 1px solid var(--borda); border-radius: 8px; padding: 12px; }
+  .num b { display: block; font-size: 22px; }
+  .num span { font-size: 12px; color: var(--txt2); }
+  .sessao { border: 1px solid var(--borda); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+  .sessao h3 { margin: 0 0 4px; font-size: 15px; }
+  .mem { font-size: 13px; color: var(--txt2); margin: 6px 0 0; }
+  .msgs { max-height: 420px; overflow: auto; border-top: 1px solid var(--borda); margin-top: 10px; padding-top: 10px; }
+  .msg { padding: 6px 0; border-bottom: 1px solid var(--borda); }
+  .msg:last-child { border-bottom: 0; }
+  .msg .de { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--txt2); }
+  .vazio { color: var(--txt2); font-size: 14px; padding: 10px 0; }
+</style>
+</head>
+<body class="painel">
+
+<div class="topo">
+  <h1>Meus chatbots</h1>
+  <div class="row">
+    <button class="btn sm on" data-tela="visao">Visão geral</button>
+    <button class="btn sm" data-tela="agentes">Agentes</button>
+    <button class="btn sm" data-tela="conversas">Conversas</button>
+    <button class="btn sm" data-tela="canais">Canais</button>
+  </div>
+  <div class="spaco"></div>
+  <span class="eu" id="euEmail"></span>
+  <button class="btn sm" id="btnSair">Sair</button>
+</div>
+
+<div class="telas">
+
+  <section id="t-visao" class="on">
+    <div class="card">
+      <h2>Resumo</h2>
+      <div class="nums" id="nums">
+        <p class="muted">carregando…</p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Fila de mensagens</h2>
+      <div id="caixa"><p class="muted">carregando…</p></div>
+    </div>
+  </section>
+
+  <section id="t-agentes">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Agentes</h2>
+        <button class="btn sm primary" id="btnNovoAgente">+ Novo agente</button>
+      </div>
+      <p class="muted">
+        Agente = o cérebro do bot: nome, instrução e memória. O canal é por onde
+        ele atende.
+      </p>
+      <div id="agentes"><p class="muted">carregando…</p></div>
+    </div>
+  </section>
+
+  <section id="t-conversas">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Conversas</h2>
+        <select id="selAgente"></select>
+      </div>
+      <p class="muted">O que cada pessoa falou e o que o bot guardou sobre ela.</p>
+      <div id="sessoes"><p class="muted">Escolha um agente.</p></div>
+    </div>
+    <div class="card hidden" id="cardSessao">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0" id="sessaoTitulo"></h2>
+        <button class="btn sm" id="btnFecharSessao">Fechar</button>
+      </div>
+      <div class="msgs" id="msgs"></div>
+    </div>
+  </section>
+
+  <section id="t-canais">
+    <div class="card">
+      <h2>Canais</h2>
+      <p class="muted">Onde seus agentes atendem.</p>
+      <div id="canais"><p class="muted">carregando…</p></div>
+    </div>
+  </section>
+
+</div>
+
+<div id="toasts"></div>
+
+<div class="hidden" id="gate">
+  <div class="card">
+    <h2>Carregando…</h2>
+    <p class="muted" id="gateErro"></p>
+  </div>
+</div>
+
+<!-- Formulário de agente. O cliente mexe só em nome e instrução: canal é
+     assunto do admin (Evolution e Instagram não-oficial exigem infraestrutura
+     da plataforma), então a escolha fica no painel admin. -->
+<div class="hidden" id="agenteForm">
+  <div class="card">
+    <h2 id="agenteFormTitulo">Novo agente</h2>
+    <label for="agNome">Nome</label>
+    <input type="text" id="agNome" placeholder="Atendimento, Vendas…">
+    <label for="agPrompt">Instrução (prompt)</label>
+    <textarea id="agPrompt" rows="8" placeholder="Você é o assistente da empresa X. Responda em português, seja direto…"></textarea>
+    <label class="row" style="margin-top:8px">
+      <input type="checkbox" id="agAtivo" checked style="width:auto"> Ativo
+    </label>
+    <div class="acoes row" style="margin-top:14px">
+      <button class="btn primary" id="agSalvar">Salvar</button>
+      <button class="btn" id="agCancelar">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/auth.js"></script>
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const esc = Auth.esc;
+
+  function toast(msg, tipo = "info") {
+    const el = document.createElement("div");
+    el.className = "toast " + tipo;
+    el.textContent = msg;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 4200);
+  }
+
+  const api = async (url, opts = {}) => {
+    const r = await fetch(Auth.API_BASE + url, {
+      ...opts,
+      headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
+    });
+    if (r.status === 401) { location.replace("/?redir=/painel"); throw new Error("sem sessao"); }
+    if (r.status === 403) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "Acesso negado."); }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || "Erro " + r.status);
+    return d;
+  };
+
+  // ---- sessão -----------------------------------------------------------
+  const eu = await Auth.obterSessao();
+  if (!eu) { location.replace("/?redir=/painel"); throw new Error("sem sessao"); }
+  if (eu.eh_admin) { location.replace("/admin"); throw new Error("e admin"); }
+  $("euEmail").textContent = eu.email;
+  $("btnSair").onclick = () => Auth.sair();
+  Auth.esconderGate();
+
+  // ---- navegação --------------------------------------------------------
+  for (const b of document.querySelectorAll("[data-tela]")) {
+    b.onclick = () => {
+      for (const x of document.querySelectorAll("[data-tela]")) x.classList.remove("on");
+      for (const s of document.querySelectorAll(".telas > section")) s.classList.remove("on");
+      b.classList.add("on");
+      $("t-" + b.dataset.tela).classList.add("on");
+      if (b.dataset.tela === "agentes") carregarAgentes();
+      if (b.dataset.tela === "conversas") preencherAgentes();
+      if (b.dataset.tela === "canais") carregarCanais();
+    };
+  }
+
+  // ---- visão geral ------------------------------------------------------
+  async function carregarResumo() {
+    try {
+      const r = await api("/api/painel/resumo");
+      const e = r.estatisticas || {};
+      $("nums").innerHTML = [
+        ["agentes", e.agentes], ["canais", e.canais],
+        ["sessões", e.sessoes], ["mensagens", e.mensagens],
+        ["respostas 7 dias", e.respostas_7d], ["na fila", e.fila_pendente],
+      ].map(([k, v]) => `<div class="num"><b>${v ?? 0}</b><span>${k}</span></div>`).join("");
+
+      // resumo_caixa devolve {contagem:{status:n}, recentes:[...], problemas:[...]}.
+      // Mostramos os problemas (o que está travado) e não só a contagem.
+      const c = r.caixa || {};
+      const pend = (c.recentes || []).filter((i) => i.status !== "ok");
+      $("caixa").innerHTML = pend.length
+        ? pend.map((i) => `
+             <div class="sessao">
+               <h3>${esc(i.remetente || "—")}</h3>
+               <p class="mem">${esc((i.texto || "").slice(0, 160))}</p>
+               <p class="mem">${esc(i.canal_nome || "")} · ${esc(i.status || "")}</p>
+             </div>`).join("")
+        : '<p class="vazio">Nada pendente. Suas mensagens estão sendo atendidas.</p>';
+    } catch (e) {
+      $("nums").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  // ---- agentes ----------------------------------------------------------
+  let editando = null;
+
+  async function carregarAgentes() {
+    try {
+      const lista = await api("/api/painel/agentes");
+      $("agentes").innerHTML = lista.length ? lista.map((a) => `
+        <div class="sessao">
+          <div class="row" style="justify-content:space-between">
+            <div>
+              <h3>${esc(a.nome)}</h3>
+              <p class="mem">${a.ativo ? "ativo" : "inativo"} ·
+                ${a.sessoes || 0} sessões · ${a.canais || 0} canais</p>
+            </div>
+            <div class="row">
+              <button class="btn sm" data-editar="${a.id}">Editar</button>
+              <button class="btn sm" data-excluir="${a.id}">Excluir</button>
+            </div>
+          </div>
+        </div>`).join("")
+        : '<p class="vazio">Você ainda não tem agentes. Crie o primeiro com o botão acima.</p>';
+
+      for (const b of $("agentes").querySelectorAll("[data-editar]")) {
+        b.onclick = () => abrirForm(lista.find((a) => a.id == b.dataset.editar));
+      }
+      for (const b of $("agentes").querySelectorAll("[data-excluir]")) {
+        b.onclick = () => excluir(b.dataset.excluir);
+      }
+    } catch (e) {
+      $("agentes").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  function abrirForm(a) {
+    editando = a || null;
+    $("agenteFormTitulo").textContent = a ? "Editar agente" : "Novo agente";
+    $("agNome").value = a ? a.nome : "";
+    $("agPrompt").value = a ? a.system_prompt : "";
+    $("agAtivo").checked = a ? !!a.ativo : true;
+    $("agenteForm").classList.remove("hidden");
+  }
+
+  $("btnNovoAgente").onclick = () => abrirForm(null);
+  $("agCancelar").onclick = () => $("agenteForm").classList.add("hidden");
+
+  $("agSalvar").onclick = async () => {
+    const nome = $("agNome").value.trim();
+    const system_prompt = $("agPrompt").value.trim();
+    if (!nome) { toast("Informe um nome.", "err"); return; }
+    if (!system_prompt) { toast("Informe a instrução do agente.", "err"); return; }
+    const btn = $("agSalvar");
+    btn.disabled = true;
+    try {
+      if (editando) {
+        await api("/api/agentes/" + editando.id, {
+          method: "PUT",
+          body: JSON.stringify({ nome, system_prompt, ativo: $("agAtivo").checked }),
+        });
+        toast("Agente atualizado.");
+      } else {
+        await api("/api/agentes", { method: "POST", body: JSON.stringify({ nome, system_prompt }) });
+        toast("Agente criado.");
+      }
+      $("agenteForm").classList.add("hidden");
+      await carregarAgentes();
+      await carregarResumo();
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  async function excluir(id) {
+    if (!confirm("Excluir este agente? Os canais e conversas dele vão junto. Não dá para desfazer.")) return;
+    try {
+      await api("/api/agentes/" + id, { method: "DELETE" });
+      toast("Agente excluído.");
+      await carregarAgentes();
+      await carregarResumo();
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  // ---- conversas --------------------------------------------------------
+  async function preencherAgentes() {
+    const sel = $("selAgente");
+    if (sel.options.length) return;
+    try {
+      const lista = await api("/api/painel/agentes");
+      if (!lista.length) { $("sessoes").innerHTML = '<p class="vazio">Crie um agente primeiro.</p>'; return; }
+      sel.innerHTML = lista.map((a) => `<option value="${a.id}">${esc(a.nome)}</option>`).join("");
+      sel.onchange = carregarSessoes;
+      await carregarSessoes();
+    } catch (e) {
+      $("sessoes").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  async function carregarSessoes() {
+    const agenteId = $("selAgente").value;
+    if (!agenteId) return;
+    try {
+      const lista = await api("/api/painel/agentes/" + agenteId + "/sessoes");
+      $("sessoes").innerHTML = lista.length ? lista.map((s) => {
+        // memoria é JSONB já parseado: guardamos um resumo estruturado do que a
+        // IA extraiu do cliente (nome, preferência, pedido em andamento...).
+        const mem = s.memoria || {};
+        const resumo = Object.entries(mem)
+          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+          .join(" · ");
+        return `
+        <div class="sessao">
+          <div class="row" style="justify-content:space-between">
+            <div>
+              <h3>${esc(s.usuario_externo || "—")}</h3>
+              <p class="mem">${s.mensagens || 0} mensagens ·
+                ${s.atualizado_em ? "última " + new Date(s.atualizado_em).toLocaleString("pt-BR") : "sem mensagens"}</p>
+              ${resumo ? `<p class="mem">${esc(resumo.slice(0, 300))}</p>` : ""}
+            </div>
+            <button class="btn sm" data-sessao="${s.id}">Abrir</button>
+          </div>
+        </div>`;
+      }).join("")
+        : '<p class="vazio">Nenhuma conversa ainda.</p>';
+      for (const b of $("sessoes").querySelectorAll("[data-sessao]")) {
+        b.onclick = () => abrirSessao(b.dataset.sessao);
+      }
+    } catch (e) {
+      $("sessoes").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  async function abrirSessao(id) {
+    try {
+      const s = await api("/api/painel/sessoes/" + id);
+      $("sessaoTitulo").textContent = s.usuario_externo || "Conversa";
+      $("msgs").innerHTML = (s.mensagens || []).map((m) => `
+        <div class="msg">
+          <div class="de">${m.de_ia ? "bot" : "cliente"}</div>
+          ${esc(m.texto)}
+        </div>`).join("") || '<p class="vazio">Sem mensagens.</p>';
+      $("cardSessao").classList.remove("hidden");
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  $("btnFecharSessao").onclick = () => $("cardSessao").classList.add("hidden");
+
+  // ---- canais -----------------------------------------------------------
+  async function carregarCanais() {
+    try {
+      const lista = await api("/api/painel/canais");
+      $("canais").innerHTML = lista.length ? lista.map((c) => `
+        <div class="sessao">
+          <h3>${esc(c.nome)}</h3>
+          <p class="mem">${esc(c.tipo)} · ${c.ativo ? "ativo" : "inativo"}</p>
+        </div>`).join("")
+        : '<p class="vazio">Nenhum canal. Fale com o suporte para ativar um.</p>';
+    } catch (e) {
+      $("canais").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  await carregarResumo();
+  carregarAgentes();
+  setInterval(carregarResumo, 30000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chatbot Project - Gestão de Agentes</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="toasts"></div>
+
+  <div id="gate" class="gate">
+    <div class="card">
+      <h2>Carregando…</h2>
+      <p class="muted" id="gateErro"></p>
+    </div>
+  </div>
+
+<aside>
+  <h1>Chatbot Project</h1>
+  <p class="sub">Gestão de agentes e canais</p>
+  <button class="btn sm" id="btnContas" style="width:100%;margin-top:6px">Contas</button>
+  <button class="btn primary" id="btnNovo" style="width:100%">+ Novo agente</button>
+  <div class="row" style="margin-top:8px">
+    <button class="btn sm" id="btnSair" style="flex:1">Sair</button>
+  </div>
+  <div id="listaAgentes" style="margin-top:14px"></div>
+  <p class="aviso">Sem cobrança nesta fase. Todos os agentes usam a mesma chave Gemini configurada no servidor.</p>
+</aside>
+
+  <div class="card hidden" id="contasCard" style="margin:0 0 12px">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Contas</h2>
+      <button class="btn sm" id="btnFecharContas">Fechar</button>
+    </div>
+    <p class="muted">
+      Quem pode entrar, com que papel, e de quem é cada agente. O papel vem do
+      servidor — o botão aqui só pede a mudança.
+    </p>
+    <div id="contasLista"></div>
+  </div>
+
+<main>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Fila de mensagens</h2>
+      <div class="row">
+        <span class="saude" id="filaResumo">carregando…</span>
+        <button class="btn sm" id="btnAtualizarFila">Atualizar</button>
+      </div>
+    </div>
+    <div id="filaProblemas" class="problemas"></div>
+  </div>
+
+  <div id="agenteForm" class="card hidden">
+    <h2 id="formTitle">Novo agente</h2>
+    <label>Nome</label>
+    <input type="text" id="nome" placeholder="Ex.: NutriTreino">
+    <label>System prompt (regras e personalidade da IA)</label>
+    <textarea id="prompt" placeholder="Você é um assistente que..."></textarea>
+    <label class="row" style="margin-top:10px"><input type="checkbox" id="ativo" checked> Agente ativo</label>
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="btnSalvar">Salvar</button>
+      <button class="btn" id="btnCancelar">Cancelar</button>
+    </div>
+  </div>
+
+  <div id="detalhe" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0" id="detalheNome">—</h2>
+        <div class="row">
+          <button class="btn" id="btnEditar">Editar</button>
+          <button class="btn danger" id="btnExcluirAgente">Excluir agente</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px"><span class="badge" id="badgeAtivo">—</span></div>
+      <div id="promptPreview" class="muted" style="margin-top:10px;white-space:pre-wrap"></div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h2 style="margin:0">Canais</h2>
+        <div class="row">
+          <select id="novoCanalTipo" style="width:290px">
+            <optgroup label="Oficiais (Meta) — estáveis, sem keepalive">
+              <option value="whatsapp_oficial">WhatsApp oficial (Cloud API)</option>
+              <option value="instagram_oficial">Instagram oficial (Messaging API)</option>
+            </optgroup>
+            <optgroup label="Oficiais (outros)">
+              <option value="telegram">Telegram</option>
+              <option value="webhook">Webhook genérico</option>
+            </optgroup>
+            <optgroup label="⚠ Não oficiais — risco de ban">
+              <option value="whatsapp">WhatsApp (Evolution/Baileys)</option>
+              <option value="instagram">Instagram (instagrapi)</option>
+            </optgroup>
+          </select>
+          <button class="btn primary" id="btnNovoCanal">+ Novo canal</button>
+        </div>
+      </div>
+      <div id="novoCanalForm" class="hidden"></div>
+      <div id="canais"></div>
+    </div>
+  </div>
+</main>
+
+<script src="/static/auth.js"></script>
+<script>
+(async () => {
+const $ = (id) => document.getElementById(id);
+let agentes = [], agenteAtual = null, editandoAgente = null;
+const timers = {};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function toast(msg, tipo = "info") {
+  const el = document.createElement("div");
+  el.className = "toast " + tipo;
+  el.textContent = msg;
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+// Quando a pagina e servida pelo FastAPI a API esta na mesma origem ("").
+// No GitHub Pages ela e estatica, entao apontamos para o backend no Render.
+// Se o index.html for aberto direto do disco (file://) nao existe origem para
+// "/api/..." resolver, e o fetch falha com "Failed to fetch": nesse caso
+// usamos a URL do Render e avisamos na tela.
+const API_RENDER = "https://chatbotproject-1-l9zr.onrender.com";
+const ABRINDO_DO_DISCO = location.protocol === "file:";
+const API_BASE = /\.github\.io$/i.test(location.hostname) || ABRINDO_DO_DISCO ? API_RENDER : "";
+
+
+const api = async (url, opts = {}, tentativa = 0) => {
+  let r;
+  try {
+    r = await fetch(API_BASE + url, {
+      ...opts,
+      headers: { "Content-Type": "application/json", ...cabecalhoAuth(), ...(opts.headers || {}) },
+    });
+  } catch (e) {
+    // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda está
+    // acordando do hibernamento do plano grátis. Uma retentativa resolve a
+    // esmagadora maioria dos casos.
+    if (tentativa < 2) {
+      if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
+      await new Promise((r2) => setTimeout(r2, 3000));
+      return api(url, opts, tentativa + 1);
+    }
+    throw new Error(
+      ABRINDO_DO_DISCO
+        ? "Não foi possível falar com a API. Abra o painel pelo endereço do Render em vez de abrir o arquivo do disco."
+        : "Não foi possível falar com a API (" + API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto."
+    );
+  }
+  if (r.status === 401) {
+    location.replace("/?redir=" + encodeURIComponent(location.pathname));
+    throw new Error("não autorizado");
+  }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { const j = await r.json(); msg = j.detail || JSON.stringify(j); } catch (e) { try { msg = await r.text(); } catch (e2) {} }
+    throw new Error(msg || ("Erro " + r.status));
+  }
+  return r.status === 204 ? null : r.json();
+};
+
+/* ---------------- Agentes ---------------- */
+
+async function carregarAgentes() {
+  agentes = await api("/api/agentes");
+  renderAgentes();
+}
+
+function renderAgentes() {
+  const el = $("listaAgentes");
+  el.innerHTML = "";
+  if (!agentes.length) {
+    el.innerHTML = '<p class="aviso">Nenhum agente ainda. Crie o primeiro em "+ Novo agente".</p>';
+    return;
+  }
+  for (const a of agentes) {
+    const d = document.createElement("div");
+    d.className = "agente-item" + (agenteAtual && agenteAtual.id === a.id ? " active" : "");
+    d.innerHTML = `<span class="nome">${esc(a.nome)}</span>
+      <span class="badge ${a.ativo ? "on" : "off"}">${a.ativo ? "ativo" : "pausado"}</span>`;
+    d.onclick = () => abrirAgente(a.id);
+    el.appendChild(d);
+  }
+}
+
+async function abrirAgente(id) {
+  agenteAtual = agentes.find((a) => a.id === id) || null;
+  if (!agenteAtual) return;
+  renderAgentes();
+  $("agenteForm").classList.add("hidden");
+  $("novoCanalForm").classList.add("hidden");
+  $("detalhe").classList.remove("hidden");
+  $("detalheNome").textContent = agenteAtual.nome;
+  $("badgeAtivo").textContent = agenteAtual.ativo ? "ativo" : "pausado";
+  $("badgeAtivo").className = "badge " + (agenteAtual.ativo ? "on" : "off");
+  $("promptPreview").textContent = agenteAtual.system_prompt || "(sem prompt)";
+  await carregarCanais(id);
+}
+
+$("btnNovo").onclick = () => {
+  agenteAtual = null; editandoAgente = null;
+  $("nome").value = ""; $("prompt").value = ""; $("ativo").checked = true;
+  $("formTitle").textContent = "Novo agente";
+  $("agenteForm").classList.remove("hidden");
+  $("detalhe").classList.add("hidden");
+  renderAgentes();
+};
+
+$("btnCancelar").onclick = () => { $("agenteForm").classList.add("hidden"); renderAgentes(); };
+
+$("btnSalvar").onclick = async (e) => {
+  const btn = e.currentTarget;
+  const nome = $("nome").value.trim(), prompt = $("prompt").value.trim();
+  if (!nome || !prompt) { toast("Preencha nome e system prompt.", "err"); return; }
+  const body = JSON.stringify({ nome, system_prompt: prompt, ativo: $("ativo").checked });
+  btn.disabled = true;
+  try {
+    if (editandoAgente) { await api(`/api/agentes/${editandoAgente}`, { method: "PUT", body }); toast("Agente atualizado.", "ok"); }
+    else { const r = await api("/api/agentes", { method: "POST", body }); toast("Agente criado.", "ok"); editandoAgente = null; }
+    $("agenteForm").classList.add("hidden");
+    await carregarAgentes();
+  } catch (err) { toast("Erro: " + err.message, "err"); }
+  btn.disabled = false;
+};
+
+$("btnEditar").onclick = () => {
+  editandoAgente = agenteAtual.id;
+  $("nome").value = agenteAtual.nome;
+  $("prompt").value = agenteAtual.system_prompt;
+  $("ativo").checked = agenteAtual.ativo;
+  $("formTitle").textContent = "Editar agente";
+  $("agenteForm").classList.remove("hidden");
+};
+
+$("btnExcluirAgente").onclick = async () => {
+  if (!confirm("Excluir o agente \"" + agenteAtual.nome + "\" e todos os canais dele?")) return;
+  try {
+    await api(`/api/agentes/${agenteAtual.id}`, { method: "DELETE" });
+    toast("Agente excluído.", "ok");
+    agenteAtual = null;
+    $("detalhe").classList.add("hidden");
+    await carregarAgentes();
+  } catch (e) { toast("Erro: " + e.message, "err"); }
+};
+
+/* ---------------- Canais ---------------- */
+
+async function carregarCanais(agenteId) {
+  Object.values(timers).forEach(clearInterval);
+  const canais = await api(`/api/agentes/${agenteId}/canais`);
+  const el = $("canais");
+  el.innerHTML = "";
+  if (!canais.length) {
+    el.innerHTML = '<p class="aviso">Nenhum canal ainda. Crie um para o agente começar a responder.</p>';
+    return;
+  }
+  for (const c of canais) el.appendChild(renderCanal(c));
+}
+
+const TIPOS_NAO_OFICIAIS = { whatsapp: "Evolution/Baileys", instagram: "instagrapi" };
+const ROTULO_TIPO = {
+  whatsapp_oficial: "WhatsApp (oficial)",
+  instagram_oficial: "Instagram (oficial)",
+  telegram: "Telegram",
+  webhook: "Webhook",
+  whatsapp: "WhatsApp (não-oficial)",
+  instagram: "Instagram (não-oficial)",
+};
+
+function renderCanal(c) {
+  const div = document.createElement("div");
+  div.className = "kanal";
+  const tipo = ROTULO_TIPO[c.tipo] || c.tipo;
+  const naoOficial = TIPOS_NAO_OFICIAIS[c.tipo];
+  div.innerHTML = `
+    <div class="head">
+      <span><strong>${esc(c.nome)}</strong>
+        <span class="badge tipo">${esc(tipo)}</span>
+        ${naoOficial ? `<span class="badge off" title="Integração não oficial: pode falhar ou banir a conta">⚠ ${esc(naoOficial)}</span>` : ""}
+        <span class="badge ${c.ativo ? "on" : "off"}">${c.ativo ? "ativo" : "pausado"}</span></span>
+      <span class="row">
+        <button class="btn sm" data-acao="testar">Testar</button>
+        <button class="btn sm" data-acao="editar">Editar</button>
+        <button class="btn sm danger" data-acao="excluir">Excluir</button>
+      </span>
+    </div>
+    <div class="kanal-body"></div>`;
+  div.querySelector('[data-acao="testar"]').onclick = (e) => testar(c.id, e.currentTarget);
+  div.querySelector('[data-acao="excluir"]').onclick = async () => {
+    if (!confirm("Excluir o canal \"" + c.nome + "\"?")) return;
+    try { await api(`/api/canais/${c.id}`, { method: "DELETE" }); toast("Canal excluído.", "ok"); carregarCanais(agenteAtual.id); }
+    catch (e) { toast("Erro: " + e.message, "err"); }
+  };
+  div.querySelector('[data-acao="editar"]').onclick = () => {
+    const body = div.querySelector(".kanal-body");
+    body.replaceChildren(formCanal(c, () => renderCanalBody(div, c)));
+  };
+  renderCanalBody(div, c);
+  return div;
+}
+
+async function webhookUrl(c) {
+  try { return (await api(`/api/canais/${c.id}/webhook-url`)).url; } catch (e) { return ""; }
+}
+
+function copiar(texto, btn) {
+  navigator.clipboard.writeText(texto).then(
+    () => { const o = btn.textContent; btn.textContent = "Copiado!"; setTimeout(() => (btn.textContent = o), 1500); },
+    () => toast("Não foi possível copiar.", "err")
+  );
+}
+
+async function renderCanalBody(div, c) {
+  const body = div.querySelector(".kanal-body");
+  const tipo = c.tipo;
+
+  if (tipo === "telegram") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">Token do bot: <code>${c.config.token ? "definido (oculto)" : "não definido"}</code></p>
+      <label>Webhook a registrar no bot</label>
+      <div class="row"><input type="text" readonly value="${esc(url)}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn green" id="tgSet">Registrar webhook (setWebhook)</button>
+        <span class="inline-result" id="tgRes"></span>
+      </div>`;
+    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
+    body.querySelector("#tgSet").onclick = async (e) => {
+      const btn = e.currentTarget, res = body.querySelector("#tgRes");
+      btn.disabled = true; res.textContent = "registrando..."; res.className = "inline-result";
+      try { const r = await api(`/api/canais/${c.id}/telegram/set-webhook`, { method: "POST" });
+        res.textContent = "OK: @" + r.bot; res.className = "inline-result ok"; toast("Webhook do Telegram configurado.", "ok"); }
+      catch (err) { res.textContent = "Erro: " + err.message; res.className = "inline-result err"; toast("Erro: " + err.message, "err"); }
+      btn.disabled = false;
+    };
+
+  } else if (tipo === "whatsapp") {
+    const estado = c.config.status || "desconectado";
+    body.innerHTML = `
+      <p class="muted">Instância: <code>${esc(c.config.instance_name || "")}</code>
+        &middot; escaneie o QR com o WhatsApp no celular que será usado pelo bot.</p>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="waConectar">Gerar novo QR</button>
+        <button class="btn danger" id="waDesc">Desconectar</button>
+      </div>
+      <div class="qrcode">
+        <div id="waQR"></div>
+        <span class="qr-status" id="waStatus">Status: ${esc(estado)}</span>
+      </div>`;
+    const mostrarQR = async () => {
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/qr`);
+        const qrEl = body.querySelector("#waQR"), stEl = body.querySelector("#waStatus");
+        if (!qrEl || !stEl) { clearInterval(timers[c.id]); return; }
+        stEl.textContent = "Status: " + r.status;
+        if (r.qr) {
+          const img = r.qr.startsWith("data:") ? r.qr : `data:image/png;base64,${r.qr}`;
+          qrEl.innerHTML = `<img src="${img}" alt="QR">`;
+          if (!timers[c.id]) timers[c.id] = setInterval(mostrarQR, 3000);
+        } else if (r.status === "open") {
+          qrEl.innerHTML = '<p class="badge on">Conectado!</p>';
+          clearInterval(timers[c.id]); delete timers[c.id];
+        }
+      } catch (e) { /* instância ainda não criada */ }
+    };
+    body.querySelector("#waConectar").onclick = async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        const r = await api(`/api/canais/${c.id}/whatsapp/conectar`, { method: "POST" });
+        toast("Novo QR gerado. Escaneie com o WhatsApp.", "ok");
+        if (r.status === "open") { body.querySelector("#waStatus").textContent = "Status: open"; }
+        else { mostrarQR(); timers[c.id] = timers[c.id] || setInterval(mostrarQR, 5000); }
+      } catch (err) { toast("Erro: " + err.message, "err"); }
+      btn.disabled = false;
+    };
+    body.querySelector("#waDesc").onclick = async () => {
+      try { await api(`/api/canais/${c.id}/whatsapp/desconectar`, { method: "POST" }); } catch (e) {}
+      clearInterval(timers[c.id]); delete timers[c.id];
+      body.querySelector("#waQR").innerHTML = "";
+      body.querySelector("#waStatus").textContent = "Status: desconectado";
+      toast("WhatsApp desconectado.", "ok");
+    };
+    mostrarQR();
+
+  } else if (tipo === "instagram") {
+    body.innerHTML = `
+      <div class="warn"><strong>Método NÃO-oficial (instagrapi / API privada).</strong> Viola os Termos de Uso
+      do Instagram e pode <strong>banir a conta</strong>; os endpoints privados mudam sem aviso e a sessão expira.
+      Para produção e estabilidade, prefira <strong>Instagram (oficial &mdash; Messaging API)</strong>.</div>
+      <p class="muted" style="margin-top:8px">sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "não definido"}</code>
+      &middot; pedidos de contato são aprovados automaticamente
+      &middot; as DMs são lidas por polling (~25s).</p>`;
+
+  } else if (tipo === "instagram_oficial" || tipo === "whatsapp_oficial") {
+    const url = esc(c.config.webhook_url || "—");
+    const familia = tipo === "instagram_oficial" ? "Instagram" : "WhatsApp";
+    const nomeId = tipo === "instagram_oficial" ? "Instagram Business Account ID" : "Phone Number ID";
+    body.innerHTML = `
+      <div class="aviso-ok"><strong>Método OFICIAL da Meta.</strong> Webhook direto, sem polling e
+      <strong>sem keepalive</strong>: o Render pode hibernar e só acorda quando chega mensagem.</div>
+      <p class="muted" style="margin-top:10px"><strong>${nomeId}:</strong> <code>${esc(c.config[tipo === "instagram_oficial" ? "ig_user_id" : "phone_number_id"] || "—")}</code>
+      &middot; <strong>verify_token:</strong> <code>${c.config.verify_token ? "definido (oculto)" : "não definido"}</code>
+      &middot; <strong>app_secret:</strong> <code>${c.config.app_secret ? "definido (oculto)" : "não definido — assine a assinatura para ativar o canal"}</code></p>
+      <p class="muted" style="margin-top:8px">Cole esta URL em <em>Meta for Developers → WhatsApp/Instagram → Webhooks</em>
+      e assine o campo <code>messages</code>:</p>
+      <div class="row"><input type="text" readonly value="${url}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <p class="muted" style="margin-top:6px">O roteamento usa o ${nomeId} do próprio evento,
+      então não há segredo na URL. O <code>app_secret</code> é <strong>obrigatório</strong>:
+      sem ele a assinatura <code>X-Hub-Signature-256</code> não pode ser conferida e o canal
+      é recusado, porque qualquer pessoa poderia forjar mensagens no seu robô.</p>`;
+    const b = body.querySelector("[data-copy]");
+    if (b) b.onclick = (e) => copiar(c.config.webhook_url || "", e.currentTarget);
+
+  } else if (tipo === "webhook") {
+    const url = await webhookUrl(c);
+    body.innerHTML = `
+      <p class="muted">URL para o cliente integrar (POST JSON <code>{ "text": ..., "user": ... }</code> → responde <code>{ "reply": ... }</code>):</p>
+      <div class="row"><input type="text" readonly value="${esc(url)}">
+        <button class="btn sm" data-copy>Copiar</button></div>
+      <pre>curl -X POST "${esc(url)}" -H "Content-Type: application/json" -d '{"text":"oi","user":"cliente1"}'</pre>`;
+    body.querySelector("[data-copy]").onclick = (e) => copiar(url, e.currentTarget);
+  }
+}
+
+async function testar(canalId, btn) {
+  const o = btn.textContent;
+  btn.disabled = true; btn.textContent = "Testando...";
+  try {
+    const r = await api(`/api/canais/${canalId}/testar`, { method: "POST" });
+    toast("OK: " + (r.info || "conectado"), "ok");
+  } catch (e) { toast("Falha: " + e.message, "err"); }
+  btn.disabled = false; btn.textContent = o;
+}
+
+/* ---------------- Fila de mensagens ---------------- */
+// Visão limpa por padrão: só os contadores. A mensagem que está presa aparece
+// como uma linha curta e o erro cru (stack do Gemini, erro da Evolution) só
+// aparece quando o usuário clica em "detalhes".
+const ROTULO_STATUS = {
+  pendente: ["na fila", "tipo"],
+  processando: ["processando", "on"],
+  erro: ["com erro", "err"],
+  respondido: ["respondidas", "on"],
+  sem_resposta: ["sem resposta", "off"],
+};
+
+function quando(iso) {
+  if (!iso) return "";
+  const seg = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seg < 60) return "agora";
+  if (seg < 3600) return Math.round(seg / 60) + "min";
+  if (seg < 86400) return Math.round(seg / 3600) + "h";
+  return Math.round(seg / 86400) + "d";
+}
+
+function renderFila(dados) {
+  const c = dados.contagem || {};
+  const partes = [];
+  for (const [chave, rot] of Object.entries(ROTULO_STATUS)) {
+    if (!c[chave]) continue;
+    const [texto, cor] = rot;
+    partes.push(`<span class="badge ${cor}">${c[chave]} ${texto}</span>`);
+  }
+  $("filaResumo").innerHTML = partes.join("") || '<span class="badge on">fila vazia</span>';
+
+  const problemas = dados.problemas || [];
+  const el = $("filaProblemas");
+  el.innerHTML = "";
+  if (!problemas.length) {
+    el.innerHTML = '<p class="vazio">Nada pendente. Todas as mensagens recebidas foram respondidas.</p>';
+    return;
+  }
+  for (const p of problemas) {
+    const [texto, cor] = ROTULO_STATUS[p.status] || [p.status, ""];
+    const div = document.createElement("div");
+    div.className = "prob";
+    const orig = p.origem || "";
+    div.innerHTML = `
+      <span class="badge ${cor}">${esc(texto)}</span>
+      <span class="txt">${esc(p.canal_nome || p.canal_id)} &middot; ${esc(p.remetente || "")}</span>
+      ${p.tentativas > 1 ? `<span class="badge">${p.tentativas}x</span>` : ""}
+      <span class="badge">${esc(quando(p.proxima_tentativa || p.criado_em))}</span>
+      ${p.ultimo_erro ? '<button class="btn sm tiny" data-detalhe>detalhes</button>' : ""}
+      <div class="erro"></div>`;
+    const btn = div.querySelector("[data-detalhe]");
+    if (btn) {
+      const bruto = div.querySelector(".erro");
+      bruto.textContent = p.ultimo_erro;
+      btn.onclick = () => {
+        const aberta = div.classList.toggle("aberta");
+        bruto.style.display = aberta ? "block" : "none";
+        btn.textContent = aberta ? "ocultar" : "detalhes";
+      };
+    }
+    el.appendChild(div);
+  }
+}
+
+let timerFila = null;
+async function atualizarFila() {
+  try {
+    renderFila(await api("/api/caixa"));
+  } catch (e) {
+    if (e.message !== "não autorizado") {
+      $("filaResumo").innerHTML = '<span class="badge err">fila indisponível</span>';
+    }
+  }
+}
+
+$("btnAtualizarFila").onclick = atualizarFila;
+
+/* ---------------- Formulários de canal ---------------- */
+
+function camposPorTipo(tipo, config = {}, novo = false) {
+  const ph = (v, dica) => (novo ? "" : (v ? dica : ""));
+  const val = (v) => (novo ? "" : esc(v || ""));
+  if (tipo === "telegram") return `
+    <label>Token do bot (BotFather)</label>
+    <input type="password" data-config="token" value="${val(config.token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Fale com <code>@BotFather</code> no Telegram e mande <code>/newbot</code>.</li>
+      <li>Dê um nome e um username terminados em <code>bot</code>.</li>
+      <li>Copie o token (números e <code>:</code>) e cole acima.</li>
+      <li>Salve o canal e clique em <strong>registrar webhook</strong>: é o passo que faz a
+          mensagem chegar. A URL já carrega o segredo do canal — não edite à mão.</li>
+    </ol>
+    <p class="muted">Se trocar o token depois, clique em "registrar webhook" de novo.</p>`;
+  if (tipo === "whatsapp") return `
+    <p class="muted">Nenhuma credencial necessária — a plataforma já possui a Evolution configurada.
+      Uma instância nova é criada e o QR Code aparece logo abaixo do nome do canal.</p>
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Salve o canal com um nome qualquer (ex.: <code>WhatsApp Principal</code>).</li>
+      <li>Abra o WhatsApp no celular &rarr; <em>Aparelhos conectados</em> &rarr; <em>Conectar um
+          aparelho</em> e escaneie o QR que aparece na tela.</li>
+      <li>Se o QR vencer, use o botão de reconectar — o código se renova sozinho.</li>
+      <li>A URL de webhook da instância é conferida e corrigida a cada ~10 min, então não
+          precisa registrar nada na mão.</li>
+    </ol>
+    <p class="muted">É o canal <strong>não oficial</strong> (Baileys): funciona sem chip e
+      sem custo, mas viola os termos do WhatsApp e pode banir o número.</p>`;
+  if (tipo === "instagram") return `
+    <div class="warn"><strong>Método NÃO-oficial (instagrapi).</strong> Ative apenas com <code>sessionid</code>:
+    o login por senha foi desativado pelo próprio Instagram (exigência de atestação de app), e esta API
+    pode <strong>banir a conta</strong>. Em produção, prefira o canal oficial da Meta.</div>
+    <label>sessionid (obrigatório)</label>
+    <input type="password" data-config="sessionid" value="${val(config.sessionid)}"
+      placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Como obter o sessionid:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>Abra <code>https://www.instagram.com</code> e faça login normalmente.</li>
+      <li>Pressione <code>F12</code> e abra a aba <em>Application</em> (Chrome) ou <em>Storage</em> (Edge).</li>
+      <li>Em <em>Cookies</em> &rarr; <code>https://www.instagram.com</code>, localize <code>sessionid</code>.</li>
+      <li>Copie o valor (começa com dígitos e dois-pontos) e cole no campo acima.</li>
+    </ol>
+    <p class="muted" style="margin-top:6px">O cookie expira: quando o canal parar de responder, repita os passos.
+    A conta pode pedir confirmação 2FA no celular em alguns casos.</p>`;
+  if (tipo === "whatsapp_oficial") return `
+    <div class="aviso-ok"><strong>Método OFICIAL</strong> (WhatsApp Cloud API). Sem QR, sem keepalive, sem risco de ban.</div>
+    <div class="grid-2">
+      <div><label>Phone Number ID</label><input type="text" data-config="phone_number_id" value="${val(config.phone_number_id)}"
+        placeholder="${novo ? "123456789012345" : ""}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"
+        placeholder="${novo ? "uma senha sua" : ""}"></div>
+    </div>
+    <label>Access token permanente</label>
+    <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <label>app secret (obrigatório — valida a assinatura do webhook)</label>
+    <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li><code>developers.facebook.com</code> &rarr; seu app &rarr; <em>WhatsApp</em> &rarr;
+          <em>API Setup</em>. Copie o <strong>Phone Number ID</strong> e o
+          <strong>Access token</strong> (gere um permanente em <em>WhatsApp &gt; Configuration</em>).</li>
+      <li><em>Configurações &gt; Básico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li>Escolha um <strong>verify_token</strong> (pode ser qualquer texto seu) e salve o canal.</li>
+      <li>Copie a <strong>URL de webhook</strong> exibida no card do canal e cole em
+          <em>Configurações &gt; Webhooks</em>; assine o campo <code>messages</code>.</li>
+      <li>Clique em <strong>Verificar e salvar</strong> no painel da Meta. Sem o
+          <code>app_secret</code> a assinatura não fecha e o canal rejeita tudo.</li>
+    </ol>
+    <p class="muted">O número precisa estar na conta do app, e o webhook é chamado pela Meta
+      direto na Edge Function — por isso não há keepalive e o Render pode hibernar.</p>`;
+  if (tipo === "instagram_oficial") return `
+    <div class="aviso-ok"><strong>Método OFICIAL</strong> (Instagram Messaging API). Webhook direto, sem polling.</div>
+    <div class="grid-2">
+      <div><label>Instagram Business Account ID</label><input type="text" data-config="ig_user_id" value="${val(config.ig_user_id)}"
+        placeholder="${novo ? "17841400..." : ""}"></div>
+      <div><label>verify_token</label><input type="text" data-config="verify_token" value="${val(config.verify_token)}"
+        placeholder="${novo ? "uma senha sua" : ""}"></div>
+    </div>
+    <label>Access token permanente</label>
+    <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
+    <label>app secret (obrigatório — valida a assinatura do webhook)</label>
+    <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
+    <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
+    <ol class="muted" style="margin:4px 0 0 18px">
+      <li>A conta precisa ser <strong>Business/Creator</strong> e estar num portfolio da Meta
+          ligado a um app.</li>
+      <li><em>Instagram &gt; API Setup</em> &rarr; copie o <strong>Instagram Business Account ID</strong>
+          e o <strong>Access token</strong> (gere permanente em <em>Instagram &gt; Configuration</em>).</li>
+      <li><em>Configurações &gt; Básico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li>Escolha um <strong>verify_token</strong>, salve o canal e cole a <strong>URL de webhook</strong>
+          exibida no card em <em>Configurações &gt; Webhooks</em>, assinando <code>messages</code>.</li>
+      <li>No perfil do Instagram, toque no botão de mensagem e confirme que a conta pode
+          receber mensagens (a Meta exige isso para liberar o Messaging API).</li>
+    </ol>`;
+  if (tipo === "webhook") return `
+    <p class="muted">Nenhuma credencial necessária. Salve o canal e a URL com o segredo é gerada automaticamente.</p>
+    <p class="muted" style="margin-top:6px"><strong>Como chamar (a resposta vem no mesmo request):</strong></p>
+    <pre class="mono" style="background:#111;color:#eee;padding:10px;border-radius:8px;overflow:auto">&nbsp;curl -X POST "URL_DO_CANAL" \\
+&nbsp;  -H "Content-Type: application/json" \\
+&nbsp;  -d '{"user":"joao","text":"oi, quero um orcamento"}'</pre>
+    <p class="muted">A resposta vem em <code>{"reply":"...","status":"respondido"}</code>. Se a IA demorar
+      mais que ~30 s, o retorno é <code>202 {"status":"na_fila"}</code> e a mensagem <strong>não é perdida</strong>:
+      o worker responde depois, com retry automático. Use <code>text</code> ou <code>texto</code>, e
+      <code>user</code> ou <code>remetente</code> — todas as grafias são aceitas.</p>`;
+  return "";
+}
+
+function coletarConfig(form) {
+  const config = {};
+  form.querySelectorAll("[data-config]").forEach((i) => { config[i.dataset.config] = i.value.trim(); });
+  return config;
+}
+
+function formCanal(c, onCancel) {
+  const div = document.createElement("div");
+  div.innerHTML = `
+    <label>Nome do canal</label>
+    <input type="text" id="cNome" value="${esc(c.nome)}">
+    <label>Ativo</label>
+    <select id="cAtivo"><option value="true">Sim</option><option value="false">Não</option></select>
+    ${camposPorTipo(c.tipo, c.config, false)}
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="cSalvar">Salvar canal</button>
+      <button class="btn" id="cCancelar">Cancelar</button>
+    </div>`;
+  div.querySelector("#cAtivo").value = String(c.ativo);
+  div.querySelector("#cCancelar").onclick = () => onCancel();
+  div.querySelector("#cSalvar").onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try {
+      await api(`/api/canais/${c.id}`, { method: "PUT", body: JSON.stringify({
+        nome: div.querySelector("#cNome").value.trim(),
+        ativo: div.querySelector("#cAtivo").value === "true",
+        config: coletarConfig(div),
+      })});
+      toast("Canal atualizado.", "ok");
+      await carregarCanais(agenteAtual.id);
+    } catch (err) { toast("Erro: " + err.message, "err"); btn.disabled = false; }
+  };
+  return div;
+}
+
+$("novoCanalTipo").onchange = () => { if (!$("novoCanalForm").classList.contains("hidden")) mostrarFormNovoCanal(); };
+
+function mostrarFormNovoCanal() {
+  const tipo = $("novoCanalTipo").value;
+  const cont = $("novoCanalForm");
+  cont.innerHTML = `
+    <div class="card" style="background:#14161f;margin:0 0 12px">
+      <h2>Novo canal: ${tipo}</h2>
+      <label>Nome do canal</label>
+      <input type="text" id="nNome" placeholder="Ex.: WhatsApp do cliente A">
+      ${camposPorTipo(tipo, {}, true)}
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="nCriar">Criar canal</button>
+        <button class="btn" id="nCancelar">Cancelar</button>
+      </div>
+    </div>`;
+  cont.classList.remove("hidden");
+  cont.querySelector("#nCancelar").onclick = () => cont.classList.add("hidden");
+  cont.querySelector("#nCriar").onclick = async (e) => {
+    const btn = e.currentTarget;
+    const nome = cont.querySelector("#nNome").value.trim();
+    if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
+    const config = coletarConfig(cont);
+    if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
+    // Instagram não-oficial é sessionid-only: o login por senha foi desativado
+    // pelo próprio Instagram, então usuário/senha não são campos, e sim erro.
+    if (tipo === "instagram" && !config.sessionid) { toast("Informe o sessionid do Instagram.", "err"); return; }
+    if (tipo === "instagram_oficial" && (!config.ig_user_id || !config.access_token || !config.verify_token || !config.app_secret)) {
+      toast("Informe ig_user_id, access_token, verify_token e app_secret.", "err"); return;
+    }
+    if (tipo === "whatsapp_oficial" && (!config.phone_number_id || !config.access_token || !config.verify_token || !config.app_secret)) {
+      toast("Informe phone_number_id, access_token, verify_token e app_secret.", "err"); return;
+    }
+    btn.disabled = true;
+    try {
+      await api(`/api/agentes/${agenteAtual.id}/canais`, { method: "POST", body: JSON.stringify({ tipo, nome, config }) });
+      toast("Canal criado.", "ok");
+      cont.classList.add("hidden");
+      await carregarCanais(agenteAtual.id);
+    } catch (err) { toast("Erro: " + err.message, "err"); btn.disabled = false; }
+  };
+}
+
+$("btnNovoCanal").onclick = () => {
+  const cont = $("novoCanalForm");
+  if (!cont.classList.contains("hidden")) { cont.classList.add("hidden"); return; }
+  mostrarFormNovoCanal();
+};
+
+
+// ---------- contas ----------
+// Só o admin chega aqui, e a API re-checa o papel em /api/admin/contas: esta
+// tela esconder o botão não é o que protege nada, o `exigir_admin` no servidor é.
+let contasCache = [];
+
+async function alternarContas() {
+  const card = $("contasCard");
+  card.classList.toggle("hidden");
+  if (card.classList.contains("hidden")) return;
+  $("contasLista").innerHTML = '<p class="muted">carregando…</p>';
+  await carregarContas();
+}
+
+async function carregarContas() {
+  try {
+    contasCache = await api("/api/admin/contas");
+  } catch (e) {
+    $("contasLista").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    return;
+  }
+  if (!contasCache.length) {
+    $("contasLista").innerHTML = '<p class="muted">Nenhuma conta encontrada.</p>';
+    return;
+  }
+  $("contasLista").innerHTML = contasCache.map((c) => `
+    <div class="row" style="justify-content:space-between;border-top:1px solid var(--borda);padding:10px 0">
+      <div>
+        <strong>${esc(c.email || c.id)}</strong>
+        <div class="muted">
+          ${c.role === "admin" ? "admin" : "cliente"}
+          ${c.bloqueado ? " · <span style='color:var(--danger)'>bloqueado</span>" : ""}
+          · ${c.agentes} agente${c.agentes === 1 ? "" : "s"}
+          ${c.criado_em ? " · " + new Date(c.criado_em).toLocaleDateString("pt-BR") : ""}
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn sm" data-conta="${esc(c.id)}" data-acao="promover">
+          ${c.role === "admin" ? "Rebaixar" : "Tornar admin"}
+        </button>
+        <button class="btn sm" data-conta="${esc(c.id)}" data-acao="bloquear">
+          ${c.bloqueado ? "Desbloquear" : "Bloquear"}
+        </button>
+      </div>
+    </div>`).join("");
+
+  for (const btn of $("contasLista").querySelectorAll("button[data-conta]")) {
+    btn.onclick = () => mudarConta(btn.dataset.conta, btn.dataset.acao);
+  }
+}
+
+async function mudarConta(contaId, acao) {
+  const conta = contasCache.find((c) => c.id === contaId);
+  if (!conta) return;
+  const body = acao === "promover"
+    ? { role: conta.role === "admin" ? "usuario" : "admin" }
+    : { bloqueado: !conta.bloqueado };
+  try {
+    await api("/api/admin/contas/" + encodeURIComponent(contaId), {
+      method: "PUT",
+      body: JSON.stringify(body)
+    });
+    toast("Conta atualizada.");
+    await carregarContas();
+  } catch (e) {
+    // O "último admin" volta como 400 e a mensagem explica o porquê.
+    toast(e.message, "err");
+  }
+}
+
+$("btnFecharContas").onclick = () => $("contasCard").classList.add("hidden");
+
+// ---------- partida ----------
+// A sessao e resolvida AQUI, nao no auth.js: o painel precisa saber o
+// papel antes de buscar qualquer dado. Sem sessao -> login; sessao de
+// cliente -> /painel. So o admin chega a carregar o painel.
+const eu = await Auth.obterSessao();
+if (!eu) {
+  location.replace("/?redir=" + encodeURIComponent(location.pathname));
+  throw new Error("sem sessao");  // aborta antes de qualquer fetch
+}
+if (!eu.eh_admin) { location.replace("/painel"); throw new Error("nao e admin"); }
+
+$("btnSair").onclick = () => Auth.sair();
+$("btnContas").onclick = () => alternarContas();
+
+Auth.esconderGate();
+await carregarAgentes();
+atualizarFila();
+timerFila = setInterval(atualizarFila, 15000);
+if (ABRINDO_DO_DISCO) {
+  toast("Você abriu o arquivo do disco: a API está em " + API_RENDER + ". Melhor usar o endereço do servidor.", "err");
+}
+})();
+</script>
+</body>
+</html>

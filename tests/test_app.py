@@ -8,8 +8,11 @@ Roda sem banco e sem rede:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
+import re
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,7 +87,12 @@ espera_erro("instagram sem sessionid e recusado", "instagram", {}, "sessionid")
 
 # --------------------------------------------------------------------------
 print("\n== segredo nenhum volta para o navegador ==")
-redigido = repo._redigir_config({
+# `redigir_config` e a unica funcao de redacao. Antes havia duas listas CHAVES_
+# SECRETAS divergentes e a usada por main._canal_publico (que atendia
+# GET /api/agentes/{id}/canais) nao cobria access_token/app_secret/verify_token:
+# o token da Meta ia em claro para o navegador. O teste chama a funcao que as
+# rotas usam, nao uma copia interna.
+redigido = repo.redigir_config({
     "token": "TG", "access_token": "META", "meta_access_token": "META2",
     "app_secret": "SEC", "verify_token": "VT-SECRETO", "senha": "P",
     "sessionid": "SID", "secret": "WH", "qr": "QR", "ig_vistos": {"1": ["m"]},
@@ -95,6 +103,19 @@ for chave in ("token", "access_token", "meta_access_token", "app_secret", "verif
     check(f"{chave} redigido", redigido.get(chave) == "********", str(redigido.get(chave)))
 for chave in ("phone_number_id", "ig_user_id", "instance_name"):
     check(f"{chave} continua visivel", redigido.get(chave) not in (None, "********"))
+
+# A rota real, nao a helper: e o que o navegador recebe.
+pelo_canal_publico = main_mod._canal_publico({
+    "id": 1, "tipo": "whatsapp_oficial",
+    "config": {"access_token": "META-CRU", "app_secret": "SEC-CRU",
+               "verify_token": "VT-CRU", "phone_number_id": "123"},
+})
+for chave in ("access_token", "app_secret", "verify_token"):
+    check(f"{chave} nao vaza em /api/agentes/{{id}}/canais",
+          pelo_canal_publico["config"].get(chave) == "********",
+          str(pelo_canal_publico["config"].get(chave)))
+check("placeholder nao sobrescreve o segredo no merge",
+      "********" in (ROOT / "app" / "repositories.py").read_text(encoding="utf-8"))
 
 # --------------------------------------------------------------------------
 print("\n== a URL do webhook oficial nao carrega segredo ==")
@@ -195,7 +216,10 @@ asyncio.run(_tarefas())
 
 # --------------------------------------------------------------------------
 print("\n== painel: o form de Instagram nao pede mais usuario/senha ==")
-html = (ROOT / "index.html").read_text(encoding="utf-8")
+# Aponta para app/static/admin.html, que e o que o servidor serve em /admin.
+# O index.html da raiz virou a home de login e nao tem mais formulario de canal;
+# testar contra ele dava a impressao de cobertura onde nao ha nenhuma.
+html = (ROOT / "app" / "static" / "admin.html").read_text(encoding="utf-8")
 # O login por senha foi desativado pelo Instagram. Se sobrar referencia a
 # usuario/senha na validacao do botao "Criar canal", o usuario fica preso
 # preenchendo um campo que nem existe mais na tela.
@@ -212,33 +236,58 @@ check("formulario do Instagram so tem o campo sessionid",
       bloco.strip()[:80])
 
 # --------------------------------------------------------------------------
-print("\n== painel aberto (sem login) e conexao resiliente ==")
-check("nao existe rota /admin nem login no painel", "/admin" not in html)
-check("o token e opcional: o gate comeca escondido",
-      '<div id="gate" class="hidden">' in html)
-check("abre o painel mesmo sem token (nao chama mostrarGate na partida)",
-      "esconderGate();\ncarregarAgentes()" in html)
-check("'Failed to fetch' virou retentativa automatica",
-      "tentativa < 2" in html and "api(url, opts, tentativa + 1)" in html)
-check("abrir o index do disco aponta para a API do Render",
-      'location.protocol === "file:"' in html and "API_RENDER" in html)
-check("botao para informar token existe", 'id="btnToken"' in html)
+print("\n== as tres telas existem e nao confiam no ADMIN_TOKEN ==")
+painel_admin = (ROOT / "app" / "static" / "admin.html").read_text(encoding="utf-8")
+home = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+painel_cli = (ROOT / "app" / "static" / "painel.html").read_text(encoding="utf-8")
+auth_js = (ROOT / "app" / "static" / "auth.js").read_text(encoding="utf-8")
+
+for nome, texto in (("admin", painel_admin), ("index", home), ("painel", painel_cli)):
+    check(f"{nome}.html existe e nao esta vazio", len(texto) > 500)
+    check(f"{nome}.html usa o auth.js", '/static/auth.js' in texto)
+    check(f"{nome}.html nao manda mais X-Admin-Token", "X-Admin-Token" not in texto)
+
+check("o painel admin exige sessao de admin antes de carregar",
+      "await Auth.obterSessao()" in painel_admin and "if (!eu.eh_admin)" in painel_admin)
+check("o painel do cliente manda o admin para /admin",
+      "eu.eh_admin" in painel_cli and '"/admin"' in painel_cli)
+check("a home tem login, cadastro e recuperacao de senha",
+      'data-modo="recuperar"' in home and "Auth.cadastrar" in home and "Auth.entrar" in home)
+check("a home manda admin para /admin e cliente para /painel",
+      'eu.eh_admin ? "/admin" : "/painel"' in home)
+check("o painel admin tem a tela de contas", 'id="contasCard"' in painel_admin
+      and "/api/admin/contas" in painel_admin)
+check("o painel do cliente usa as rotas escopadas em /api/painel",
+      "/api/painel/agentes" in painel_cli and "/api/painel/sessoes" in painel_cli)
+check("o auth envia Authorization: Bearer", "Authorization" in auth_js
+      and '"Bearer "' in auth_js)
+check("o auth guarda a sessao em localStorage", "localStorage" in auth_js)
+check("o logout chama o GoTrue", "/auth/v1/logout" in auth_js)
 
 # --------------------------------------------------------------------------
-print("\n== acesso a API: token opcional, 401 so se configurado ==")
+print("\n== a API esta fechada: sem sessao nao entra ==")
+# O comportamento antigo (sem ADMIN_TOKEN a API ficava aberta) foi trocado: com
+# multi-tenant um `WHERE id = $1` responderia a fila de outro cliente, entao o
+# padrao passou a ser "fechado". Estes testes fixam isso.
 
 
-def _chamar_api(token: str | None, headers: dict | None = None):
-    """Chama a API pelo ASGI, com o token do servidor escolhido em tempo de teste."""
+def _com_auth(monkey_auth: bool | None = None):
+    """TestClient com has_auth forcado."""
     from fastapi.testclient import TestClient
 
-    antigo = main_mod.settings.admin_token
-    object.__setattr__(main_mod.settings, "admin_token", token or "")
+    antigo = main_mod.settings.supabase_url, main_mod.settings.supabase_anon_key
+    if monkey_auth is None:
+        object.__setattr__(main_mod.settings, "supabase_url", "")
+        object.__setattr__(main_mod.settings, "supabase_anon_key", "")
+    else:
+        object.__setattr__(main_mod.settings, "supabase_url", "https://x.supabase.co")
+        object.__setattr__(main_mod.settings, "supabase_anon_key", "anon-key")
     try:
         with TestClient(main_mod.app) as c:
-            return c.get("/api/agentes", headers=headers or {})
+            return c
     finally:
-        object.__setattr__(main_mod.settings, "admin_token", antigo)
+        object.__setattr__(main_mod.settings, "supabase_url", antigo[0])
+        object.__setattr__(main_mod.settings, "supabase_anon_key", antigo[1])
 
 
 try:
@@ -249,20 +298,39 @@ except Exception:
     tem_testclient = False
 
 if tem_testclient:
-    r = _chamar_api(None)
-    check("sem ADMIN_TOKEN a API fica aberta (padrao pedido)", r.status_code == 200,
-          f"HTTP {r.status_code}")
-    r = _chamar_api("segredo-do-admin", {})
-    check("com ADMIN_TOKEN e sem header responde 401", r.status_code == 401,
-          f"HTTP {r.status_code}")
-    r = _chamar_api("segredo-do-admin", {"X-Admin-Token": "errado"})
-    check("com ADMIN_TOKEN e token errado responde 401", r.status_code == 401,
-          f"HTTP {r.status_code}")
-    r = _chamar_api("segredo-do-admin", {"X-Admin-Token": "segredo-do-admin"})
-    check("com ADMIN_TOKEN e token certo responde 200", r.status_code == 200,
-          f"HTTP {r.status_code}")
-    r = _chamar_api("segredo-do-admin", {})
-    check("o painel abre mesmo assim: o 401 so mostra o campo de token", r.status_code == 401)
+    c = _com_auth()
+    for rota in ("/api/agentes", "/api/eu", "/api/caixa", "/api/painel/resumo",
+                 "/api/painel/agentes", "/api/admin/contas"):
+        r = c.get(rota)
+        check(f"{rota} sem sessao nao entrega nada",
+              r.status_code in (401, 503), f"HTTP {r.status_code}")
+
+    c = _com_auth()
+    r = c.get("/api/eu")
+    check("sem sessao e sem Supabase no servidor responde 503 (faltam as envs)",
+          r.status_code == 503, f"HTTP {r.status_code}")
+
+    # As paginas sao publicas: e o shell do HTML, nenhum dado sai delas.
+    c = _com_auth()
+    for rota in ("/", "/admin", "/painel", "/api/config", "/health"):
+        r = c.get(rota)
+        check(f"{rota} e publica", r.status_code == 200, f"HTTP {r.status_code}")
+
+    c = _com_auth()
+    r = c.get("/api/config")
+    corpo = r.json()
+    check("/api/config entrega url e anon key (publicas por natureza)",
+          corpo.get("auth_habilitado") is False
+          and "supabase_url" in corpo and "supabase_anon_key" in corpo)
+    check("/api/config nao entrega a service_role nem o admin token",
+          "service_role" not in corpo and "admin_token" not in corpo)
+
+    # Rotas do painel do cliente registradas.
+    c = _com_auth()
+    rotas = set(c.app.openapi()["paths"])
+    for esperada in ("/api/painel/resumo", "/api/painel/agentes",
+                     "/api/painel/sessoes/{sessao_id}", "/api/admin/contas"):
+        check(f"rota {esperada} registrada", esperada in rotas)
 else:
     print("  (pulado: fastapi.testclient nao instalado)")
 
@@ -326,6 +394,102 @@ try:
 except AssertionError as e:
     check("salvar_na_caixa recusa origem vazia", True, str(e)[:70])
 
+
+# --------------------------------------------------------------------------
+print("\n== isolamento: um cliente nao alcanca os dados de outro ==")
+# O teste que importa. Nao basta a API responder 401 sem token: com token
+# valido, o cliente A nao pode ver nem alterar o agente/canal/sessao do cliente
+# B. Aqui nao ha banco, entao verificamos a camada que decide o dono e a
+# traducao dela para as queries.
+
+from app import auth as auth_mod  # noqa: E402
+
+check("admin recebe dono None (enxerga tudo)", main_mod._dono(
+    auth_mod.Usuario(id="a", email="a@x", role="admin")) is None)
+check("usuario comum recebe o proprio id como dono", main_mod._dono(
+    auth_mod.Usuario(id="u1", email="u1@x", role="usuario")) == "u1")
+check("a conta de emergencia e admin", auth_mod.ADMIN_EMERGENCIA.eh_admin)
+try:
+    uuid.UUID(auth_mod.ADMIN_EMERGENCIA.id)
+    _emergencia_e_uuid = True
+except (ValueError, AttributeError):
+    _emergencia_e_uuid = False
+check("a conta de emergencia nao tem id de uuid (nao pode ir para uma FK)",
+      not _emergencia_e_uuid, auth_mod.ADMIN_EMERGENCIA.id)
+
+# _canal_dono tem de passar o dono para a query de posse, nunca chamar
+# obter_canal puro: foi o que permitia chutar o id sequencial do canal alheio.
+fonte = inspect.getsource(main_mod._canal_dono)
+check("_canal_dono consulta com o dono", "obter_canal_do_dono" in fonte
+      and "_dono(usuario)" in fonte)
+
+# Toda rota /api/canais/{canal_id}/... tem de pedir sessao E conferir a posse.
+# Os /webhook/... ficam de fora de proposito: sao publicos e se autenticam pelo
+# segredo do canal na propria rota.
+src_main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+# Split so em "@app." no inicio de linha: cortando tambem em "async def" o
+# chunk da rota ficaria apenas com a linha do decorator, sem o corpo.
+partes = re.split(r"\n(?=@app\.)", src_main)
+rotas_canal, sem_porte = [], []
+for parte in partes:
+    m = re.match(r'@app\.(?:get|post|put|delete)\("(/api/canais/\{canal_id\}[^"]*)"\)', parte)
+    if not m:
+        continue
+    rotas_canal.append(m.group(1))
+    tem_sessao = "usuario_atual(request)" in parte
+    tem_porte = "_canal_dono(" in parte or "obter_canal_do_dono(" in parte
+    if not (tem_sessao and tem_porte):
+        sem_porte.append(m.group(1))
+check("toda rota de canal por id exige sessao e confere a posse",
+      len(rotas_canal) >= 8 and not sem_porte,
+      f"{len(rotas_canal)} rotas; sem porte: " + (", ".join(sem_porte) or "nenhuma"))
+
+# Webhooks publicos continuam existindo e autenticam pelo segredo do canal.
+check("os webhooks seguem publicos (secret na rota)", "/webhook/" in src_main
+      and "_secret_igual(" in src_main)
+
+# A fila e a tabela onde o vazamento doeria mais: texto de conversa de cliente.
+fonte_caixa = inspect.getsource(repo.resumo_caixa)
+check("resumo_caixa filtra por dono (fila nao e global para o cliente)",
+      "a.dono_id" in fonte_caixa and "dono_id" in fonte_caixa)
+check("o filtro do dono usa $1, e o LIMIT seguinte",
+      " AND a.dono_id = $1" in fonte_caixa
+      and " AND a.dono_id = $2" not in fonte_caixa)
+
+for fn in ("listar_agentes", "obter_agente", "atualizar_agente", "excluir_agente",
+           "obter_canal_do_dono", "listar_canais_do_dono", "obter_sessao_do_dono"):
+    check(f"{fn} aceita dono_id", "dono_id" in inspect.signature(getattr(repo, fn)).parameters)
+
+# --------------------------------------------------------------------------
+print("\n== RLS: o schema novo nao da leitura ao anon ==")
+schema = (ROOT / "sql" / "schema.sql").read_text(encoding="utf-8")
+check("cria perfis e app_config", "CREATE TABLE IF NOT EXISTS perfis" in schema
+      and "CREATE TABLE IF NOT EXISTS app_config" in schema)
+check("agentes ganha dono_id com FK para auth.users",
+      "ADD COLUMN IF NOT EXISTS dono_id UUID REFERENCES auth.users(id)" in schema)
+check("o ON DELETE CASCADE apaga o agente com a conta",
+      "ON DELETE CASCADE" in schema)
+check("cria trigger de perfil no cadastro",
+      "criar_perfil" in schema and "AFTER INSERT ON auth.users" in schema)
+check("o papel vem de app_config.admin_emails", "admin_emails" in schema)
+for tabela in ("agentes", "canais", "sessoes", "mensagens", "caixa_entrada"):
+    check(f"RLS ligado em {tabela}",
+          f"ALTER TABLE {tabela} ENABLE ROW LEVEL SECURITY" in schema)
+check("revoga tudo de anon", "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon" in schema)
+check("anon NAO recebe mais SELECT em tudo",
+      "GRANT SELECT ON ALL TABLES IN SCHEMA public TO anon" not in schema)
+check("authenticated recebe so SELECT",
+      "GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated" in schema)
+
+mig4 = (ROOT / "supabase" / "migrations" / "0004_contas_e_multitenant.sql").read_text(encoding="utf-8")
+check("a migration 0004 existe", "perfis" in mig4 and "dono_id" in mig4)
+check("a 0004 tambem revoga o anon", "FROM anon" in mig4)
+
+# O painel do cliente nao pode ter os botoes de infraestrutura da plataforma.
+check("o painel do cliente nao expoe canais nao-oficiais a nao-admin",
+      "CANAIS_NAO_OFICIAIS_PARA_USUARIOS" in (ROOT / "app" / "config.py").read_text(encoding="utf-8"))
+check("a restricao de canal nao oficial existe no servidor",
+      "_exigir_tipo_permitido" in src_main)
 
 # --------------------------------------------------------------------------
 print("\n== resumo ==")

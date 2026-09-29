@@ -13,8 +13,16 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import repositories as repo
+from app.auth import (
+    ADMIN_EMERGENCIA,
+    exigir_admin,
+    exigir_nao_bloqueado,
+    resolver_usuario,
+    usuario_atual,
+)
 from app.channels import evolution, instagram, meta_oficial, telegram
 from app.config import settings
 from app.database import close_pool, get_pool
@@ -23,8 +31,15 @@ from app.pipeline import processar_mensagem
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
 
+# Id sentinela da conta de emergência (ADMIN_TOKEN). Não é um uuid, e é por isso
+# que nenhuma rota tenta gravá-lo em coluna com FK para auth.users.
+ADMIN_EMERGENCIA_ID = ADMIN_EMERGENCIA.id
+
 RAIZ = Path(__file__).resolve().parent.parent
-INDEX_HTML = RAIZ / "index.html"
+ESTATICO = RAIZ / "app" / "static"
+INDEX_HTML = ESTATICO / "index.html"
+ADMIN_HTML = ESTATICO / "admin.html"
+PAINEL_HTML = ESTATICO / "painel.html"
 MAX_CANAIS_POR_AGENTE = 5
 
 # Janela que o webhook generico espera o worker responder antes de devolver
@@ -196,13 +211,37 @@ def _secret_igual(a: str, b: str) -> bool:
     return hmac.compare_digest((a or "").encode("utf-8"), (b or "").encode("utf-8"))
 
 
-def _canal_publico(canal: dict | None) -> dict | None:
-    """Copia do canal com os segredos mascarados, para ir ao navegador."""
+def _dono(usuario) -> str | None:
+    """Filtro de tenant para as queries.
+
+    `None` = admin, que enxerga todos os agentes. Qualquer outro valor = o uuid
+    da conta, e o repositório restringe tudo a esse dono. Este é o único lugar
+    onde se decide isso; as rotas só repassam o valor.
+    """
+    return None if usuario.eh_admin else usuario.id
+
+
+async def _canal_dono(canal_id: int, usuario) -> dict:
+    """Canal, conferindo a posse. 404 quando não existe *ou* é de outra conta.
+
+    Todas as rotas que recebem só `canal_id` passam por aqui. Sem a conferência,
+    o id sequencial do canal seria suficiente para editar, apagar, ler a URL do
+    webhook ou disparar um teste no canal de outro cliente.
+    """
+    canal = await repo.obter_canal_do_dono(canal_id, _dono(usuario))
     if not canal:
-        return canal
-    saida = dict(canal)
-    saida["config"] = repo.redigir_config(canal.get("config") or {})
-    return saida
+        raise HTTPException(404, "Canal não encontrado.")
+    return canal
+
+
+def _canal_publico(canal: dict | None) -> dict | None:
+    """Canal com a config redigida, para ir ao navegador.
+
+    Delegado ao repositório de propósito: a redação é responsabilidade de quem
+    conhece a lista de segredos, e ter uma segunda cópia aqui foi exatamente o
+    que deixou o access_token da Meta escapar.
+    """
+    return repo.canal_publico(canal)
 
 
 # --------------------------------------------------------------------------
@@ -210,7 +249,10 @@ def _canal_publico(canal: dict | None) -> dict | None:
 # --------------------------------------------------------------------------
 
 async def _tratar_mensagem(canal: dict, usuario_externo: str, texto: str):
-    agente = await repo.obter_agente(canal["agente_id"])
+    # `None` como dono: este caminho é o worker interno, que processa a fila de
+    # todos os tenants. Ele não é uma requisição de usuário, e o canal já veio
+    # resolvido pela fila — não há nada a checar aqui.
+    agente = await repo.obter_agente(canal["agente_id"], None)
     if not agente or not agente["ativo"]:
         return
     resposta = await processar_mensagem(agente, canal, usuario_externo, texto)
@@ -602,6 +644,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Chatbot Project SaaS", lifespan=lifespan)
 
+# O menu do cliente mora em app/painel.py: sao rotas de leitura de um tenant so,
+# separadas das de administracao que ficam aqui. Importar depois de criar o
+# `app` evita ciclo, porque painel.py nao importa o main.
+from app import painel as painel_router  # noqa: E402
+
+app.include_router(painel_router.router)
+
+# Paginas e assets. Montado explicitamente porque as tres telas (index/admin/
+# painel) e seus .js/.css sao servidos daqui em vez do diretorio do projeto.
+if ESTATICO.is_dir():
+    app.mount("/static", StaticFiles(directory=ESTATICO), name="static")
+
 # A pagina tambem pode ser hospedada no GitHub Pages, entao liberamos CORS
 # para que o navegador consiga chamar esta API de outra origem.
 app.add_middleware(
@@ -611,41 +665,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rotas publicas: a pagina (o shell vazio), o health check usado pelo Render e
-# pela edge function para acordar o app, e os webhooks (que tem segredo proprio
-# na propria rota, checked la dentro).
-_ROTAS_PUBLICAS = ("/", "/health")
+# Rotas publicas: as tres paginas (sao so o shell do HTML; os dados exigem
+# conta), o health check do Render, a config do front e os webhooks, que tem
+# segredo proprio na propria rota. TODO o resto exige usuario logado.
+_ROTAS_PUBLICAS = ("/", "/health", "/admin", "/painel", "/api/config")
+_PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
+
+
+def _eh_publica(caminho: str) -> bool:
+    return caminho in _ROTAS_PUBLICAS or caminho.startswith(_PREFIXOS_PUBLICOS)
 
 
 @app.middleware("http")
-async def exigir_admin(request: Request, call_next):
-    """Proteção OPCIONAL do painel, por token (sem login de usuário).
+async def exigir_login(request: Request, call_next):
+    """Fecha a API: sem sessão válida, nenhuma rota /api/* responde.
 
-    Padrão: ADMIN_TOKEN vazio => API aberta, que é o que foi pedido. Se você
-    definir um ADMIN_TOKEN no servidor, tudo que não for rota pública/webhook
-    passa a exigir o header X-Admin-Token (é só colar no campo "Token" do
-    painel, sem conta/senha).
-
-    Mesmo no modo aberto os segredos nunca voltam ao navegador: token, sessionid,
-    access_token e app_secret saem mascarados por _canal_publico.
+    Antes, sem `ADMIN_TOKEN` no servidor a API ficava aberta e o painel não
+    tinha login nenhum. Com multi-tenant isso deixou de ser opção: um
+    `WHERE id = $1` responderia com a fila de mensagens de outro cliente. O
+    padrão agora é "fechado" — quem não tem sessão leva 401, sempre.
     """
     caminho = request.url.path
-    if caminho in _ROTAS_PUBLICAS or caminho.startswith("/webhook/"):
+    if _eh_publica(caminho) or request.method == "OPTIONS":
         return await call_next(request)
-    # O preflight do navegador (GitHub Pages -> API) não leva o X-Admin-Token.
-    # Se fosse barrado aqui, o CORS nem responderia e a página ficaria muda.
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    if not settings.has_admin:
-        return await call_next(request)
-    if not _secret_igual(request.headers.get("x-admin-token", ""), settings.admin_token):
-        return JSONResponse({"detail": "Token de acesso inválido ou ausente."}, status_code=401)
+
+    if not settings.has_auth:
+        return JSONResponse(
+            {
+                "detail": "Supabase Auth não configurado no servidor. Defina SUPABASE_URL e "
+                          "SUPABASE_ANON_KEY (veja deploy/.env.example) para habilitar as contas."
+            },
+            status_code=503,
+        )
+
+    try:
+        usuario = await resolver_usuario(request)
+    except HTTPException as e:
+        return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+
+    if usuario is None:
+        return JSONResponse(
+            {"detail": "Sessão ausente ou expirada. Faça login."},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if usuario.bloqueado:
+        return JSONResponse({"detail": "Conta bloqueada. Fale com o administrador."},
+                            status_code=403)
+    request.state.usuario = usuario
     return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)
 async def index():
+    """Home: login e cadastro. A escolha admin x cliente acontece depois, no
+    navegador, conforme o papel que o servidor devolve em /api/config."""
     return FileResponse(INDEX_HTML)
+
+
+@app.get("/admin", include_in_schema=False)
+async def pagina_admin():
+    return FileResponse(ADMIN_HTML)
+
+
+@app.get("/painel", include_in_schema=False)
+async def pagina_painel():
+    return FileResponse(PAINEL_HTML)
+
+
+@app.get("/api/config", include_in_schema=False)
+async def api_config():
+    """O que o navegador precisa antes de ter conta: URL do Supabase e a chave
+    publicável (que existe justamente para ir no cliente). Nada sensível — a
+    service_role nunca sai do servidor."""
+    return {
+        "supabase_url": settings.supabase_url,
+        "supabase_anon_key": settings.supabase_anon_key,
+        "auth_habilitado": settings.has_auth,
+        "nao_oficiais_para_usuarios": settings.canais_nao_oficiais_para_usuarios,
+    }
+
+
+@app.get("/api/eu", include_in_schema=False)
+async def api_eu(request: Request):
+    """Quem sou eu. O front lê isto para saber se leva para /admin ou /painel,
+    e para mostrar o nome. Também é o que faz o login parecer instantâneo."""
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
+
+    # Adoção dos agentes anteriores ao multi-tenant. `dono_id IS NULL` vira zero
+    # linhas depois da primeira vez, então repetir a cada visita é barato — e
+    # evita depender de o operador lembrar de rodar um UPDATE depois do deploy.
+    # A conta de emergência (ADMIN_TOKEN) fica de fora: o id dela não é um uuid
+    # e a FK de agentes.dono_id recusaria o INSERT.
+    if usuario.eh_admin and usuario.id != ADMIN_EMERGENCIA_ID:
+        try:
+            await repo.reivindicar_agentes_sem_dono(usuario.id)
+        except Exception as e:
+            log.warning("Não consegui reivindicar agentes sem dono: %s", e)
+
+    return {
+        "id": usuario.id,
+        "email": usuario.email,
+        "role": usuario.role,
+        "eh_admin": usuario.eh_admin,
+    }
 
 
 @app.get("/health", include_in_schema=False)
@@ -764,15 +888,23 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
 
 # --------------------------------------------------------------------------
 # Gestão de agentes
+#
+# O mesmo conjunto de rotas serve ao admin e ao cliente. A única diferença é o
+# `dono` que o repositório aplica: o admin passa None (vê tudo) e o cliente
+# passa o próprio uuid (vê só o que é dele). Não existe rota paralela "de
+# cliente": duplicar isso é como uma rota nova nasce sem filtro e vaza dados.
 # --------------------------------------------------------------------------
 
 @app.get("/api/agentes")
-async def get_agentes():
-    return await repo.listar_agentes()
+async def get_agentes(request: Request):
+    usuario = usuario_atual(request)
+    return await repo.listar_agentes(_dono(usuario))
 
 
 @app.post("/api/agentes")
 async def post_agente(request: Request):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
     body = await request.json()
     nome = (body.get("nome") or "").strip()
     prompt = (body.get("system_prompt") or "").strip()
@@ -780,27 +912,41 @@ async def post_agente(request: Request):
         raise HTTPException(400, "Informe o nome do agente.")
     if not prompt:
         raise HTTPException(400, "Informe o system prompt.")
-    return await repo.criar_agente(nome, prompt)
+    # O dono é SEMPRE a conta logada. Ignorar um "dono_id" que venha no corpo é
+    # proposital: se o campo fosse respeitado, bastaria trocar o uuid no corpo
+    # para criar agente na conta de outro.
+    return await repo.criar_agente(nome, prompt, usuario.id)
 
 
 @app.put("/api/agentes/{agente_id}")
 async def put_agente(agente_id: int, request: Request):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
     body = await request.json()
     nome = (body.get("nome") or "").strip()
     prompt = (body.get("system_prompt") or "").strip()
     ativo = bool(body.get("ativo", True))
     if not nome or not prompt:
         raise HTTPException(400, "Nome e system prompt são obrigatórios.")
-    r = await repo.atualizar_agente(agente_id, nome, prompt, ativo)
+    r = await repo.atualizar_agente(agente_id, nome, prompt, ativo, _dono(usuario))
     if not r:
+        # 404 e não 403: para quem não é dono, o agente não deve nem existir
+        # como informação (a existência já é dado do outro cliente).
         raise HTTPException(404, "Agente não encontrado.")
     return r
 
 
 @app.delete("/api/agentes/{agente_id}")
-async def delete_agente(agente_id: int):
+async def delete_agente(agente_id: int, request: Request):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
+    dono = _dono(usuario)
+    # Confere a posse ANTES de apagar: os canais são lidos para derrubar a
+    # instância na Evolution, e essa limpeza não pode rodar para agente alheio.
+    if not await repo.obter_agente(agente_id, dono):
+        raise HTTPException(404, "Agente não encontrado.")
     canais = await repo.listar_canais(agente_id)
-    if not await repo.excluir_agente(agente_id):
+    if not await repo.excluir_agente(agente_id, dono):
         raise HTTPException(404, "Agente não encontrado.")
     if settings.has_evolution:
         for c in canais:
@@ -819,13 +965,36 @@ async def delete_agente(agente_id: int):
 # --------------------------------------------------------------------------
 
 @app.get("/api/agentes/{agente_id}/canais")
-async def get_canais(agente_id: int):
+async def get_canais(agente_id: int, request: Request):
+    usuario = usuario_atual(request)
+    if not await repo.obter_agente(agente_id, _dono(usuario)):
+        raise HTTPException(404, "Agente não encontrado.")
     return [_canal_publico(c) for c in await repo.listar_canais(agente_id)]
+
+
+def _exigir_tipo_permitido(usuario, tipo: str) -> None:
+    """Canais não oficiais criam instância em infraestrutura compartilhada e
+    podem banir a conta conectada. Eles ficam restritos ao admin; a variável
+    CANAIS_NAO_OFICIAIS_PARA_USUARIOS abre para todos os clientes, se o
+    operador decidir assumir esse risco."""
+    if usuario.eh_admin or tipo not in ("whatsapp", "instagram"):
+        return
+    if settings.canais_nao_oficiais_para_usuarios:
+        return
+    raise HTTPException(
+        403,
+        f"O canal \"{tipo}\" não está disponível na sua conta. Use os oficiais da "
+        "Meta (WhatsApp Cloud API / Instagram Messaging API) ou o Telegram: eles "
+        "são estáveis e não podem banir a conta conectada. Fale com o administrador "
+        "se precisar deste canal.",
+    )
 
 
 @app.post("/api/agentes/{agente_id}/canais")
 async def post_canal(agente_id: int, request: Request):
-    if not await repo.obter_agente(agente_id):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
+    if not await repo.obter_agente(agente_id, _dono(usuario)):
         raise HTTPException(404, "Agente não encontrado.")
     body = await request.json()
     tipo = body.get("tipo", "").strip()
@@ -835,6 +1004,7 @@ async def post_canal(agente_id: int, request: Request):
         raise HTTPException(400, "Tipo de canal inválido.")
     if not nome:
         raise HTTPException(400, "Informe um nome para o canal.")
+    _exigir_tipo_permitido(usuario, tipo)
 
     existentes = await repo.listar_canais(agente_id)
     if len(existentes) >= MAX_CANAIS_POR_AGENTE:
@@ -845,6 +1015,7 @@ async def post_canal(agente_id: int, request: Request):
 
     config["secret"] = _gerar_secret()
     if tipo == "whatsapp":
+
         config["instance_name"] = f"{settings.evolution_instance_prefix}{agente_id}x{secrets.token_hex(3)}"
         canal = await repo.criar_canal(agente_id, tipo, nome, config)
         try:
@@ -869,15 +1040,16 @@ async def post_canal(agente_id: int, request: Request):
 
 @app.put("/api/canais/{canal_id}")
 async def put_canal(canal_id: int, request: Request):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
     body = await request.json()
     nome = (body.get("nome") or "").strip()
     ativo = bool(body.get("ativo", True))
     novos = dict(body.get("config") or {})
     if not nome:
         raise HTTPException(400, "Informe um nome para o canal.")
-    atual = await repo.obter_canal(canal_id)
-    if not atual:
-        raise HTTPException(404, "Canal não encontrado.")
+    atual = await _canal_dono(canal_id, usuario)
+    _exigir_tipo_permitido(usuario, atual["tipo"])
 
     # Mescla preservando segredos: o painel reexibe '********' e não deve
     # sobrescrever o token/sessionid guardado com esse placeholder.
@@ -899,10 +1071,10 @@ async def put_canal(canal_id: int, request: Request):
 
 
 @app.delete("/api/canais/{canal_id}")
-async def delete_canal(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal:
-        raise HTTPException(404, "Canal não encontrado.")
+async def delete_canal(canal_id: int, request: Request):
+    usuario = usuario_atual(request)
+    exigir_nao_bloqueado(usuario)
+    canal = await _canal_dono(canal_id, usuario)
     await repo.excluir_canal(canal_id)
     if canal["tipo"] == "whatsapp" and settings.has_evolution and canal["config"].get("instance_name"):
         try:
@@ -952,17 +1124,14 @@ def _url_de_webhook(canal: dict) -> str:
 
 
 @app.get("/api/canais/{canal_id}/webhook-url")
-async def get_webhook_url(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal:
-        raise HTTPException(404, "Canal não encontrado.")
-    return {"url": _url_de_webhook(canal)}
+async def get_webhook_url(canal_id: int, request: Request):
+    return {"url": _url_de_webhook(await _canal_dono(canal_id, usuario_atual(request)))}
 
 
 @app.post("/api/canais/{canal_id}/telegram/set-webhook")
-async def set_telegram_webhook(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "telegram":
+async def set_telegram_webhook(canal_id: int, request: Request):
+    canal = await _canal_dono(canal_id, usuario_atual(request))
+    if canal["tipo"] != "telegram":
         raise HTTPException(404, "Canal de Telegram não encontrado.")
     token = canal["config"].get("token")
     if not token:
@@ -1003,9 +1172,9 @@ async def _conectar_whatsapp(canal: dict) -> str:
 
 
 @app.post("/api/canais/{canal_id}/whatsapp/conectar")
-async def connect_whatsapp(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "whatsapp":
+async def connect_whatsapp(canal_id: int, request: Request):
+    canal = await _canal_dono(canal_id, usuario_atual(request))
+    if canal["tipo"] != "whatsapp":
         raise HTTPException(404, "Canal de WhatsApp não encontrado.")
     qr = await _conectar_whatsapp(canal)
     return {"ok": True, "status": "scanning", "qr": qr}
@@ -1027,9 +1196,9 @@ async def _buscar_qr(canal: dict) -> str:
 
 
 @app.get("/api/canais/{canal_id}/whatsapp/qr")
-async def get_whatsapp_qr(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "whatsapp":
+async def get_whatsapp_qr(canal_id: int, request: Request):
+    canal = await _canal_dono(canal_id, usuario_atual(request))
+    if canal["tipo"] != "whatsapp":
         raise HTTPException(404, "Canal de WhatsApp não encontrado.")
     status = canal["config"].get("status", "")
     if status == "open":
@@ -1044,16 +1213,18 @@ async def get_whatsapp_qr(canal_id: int):
 
 
 @app.get("/api/caixa")
-async def get_caixa():
+async def get_caixa(request: Request):
     if not settings.has_db:
         raise HTTPException(503, "Banco de dados não configurado.")
-    return await repo.resumo_caixa()
+    # Escopada ao dono: o texto das mensagens e o remetente são conversa de
+    # cliente, então a fila global só sai para o admin.
+    return await repo.resumo_caixa(dono_id=_dono(usuario_atual(request)))
 
 
 @app.post("/api/canais/{canal_id}/whatsapp/desconectar")
-async def disconnect_whatsapp(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal or canal["tipo"] != "whatsapp":
+async def disconnect_whatsapp(canal_id: int, request: Request):
+    canal = await _canal_dono(canal_id, usuario_atual(request))
+    if canal["tipo"] != "whatsapp":
         raise HTTPException(404, "Canal de WhatsApp não encontrado.")
     if settings.has_evolution:
         url, key = _evo_creds()
@@ -1067,10 +1238,8 @@ async def disconnect_whatsapp(canal_id: int):
 
 
 @app.post("/api/canais/{canal_id}/testar")
-async def testar_canal(canal_id: int):
-    canal = await repo.obter_canal(canal_id)
-    if not canal:
-        raise HTTPException(404, "Canal não encontrado.")
+async def testar_canal(canal_id: int, request: Request):
+    canal = await _canal_dono(canal_id, usuario_atual(request))
     cfg = canal["config"]
     try:
         if canal["tipo"] == "telegram":
@@ -1088,3 +1257,86 @@ async def testar_canal(canal_id: int):
             return {"ok": True, "info": f"{info} (oficial)"}
     except Exception as e:
         raise HTTPException(400, f"Falha no teste: {e}")
+
+
+# --------------------------------------------------------------------------
+# Administração de contas
+#
+# Só o admin chega aqui. É a parte que "separa as instâncias": quem é cliente,
+# quem é admin, e de quem é cada agente.
+# --------------------------------------------------------------------------
+
+@app.get("/api/admin/contas")
+async def admin_listar_contas(request: Request):
+    exigir_admin(usuario_atual(request))
+    return await repo.listar_perfis()
+
+
+@app.get("/api/admin/contas/{conta_id}")
+async def admin_detalhe_conta(conta_id: str, request: Request):
+    """Uma conta e os agentes dela. O admin precisa disso para conferir a
+    separação sem precisar sair do painel."""
+    exigir_admin(usuario_atual(request))
+    perfil = await repo.obter_perfil(conta_id)
+    if not perfil:
+        raise HTTPException(404, "Conta não encontrada.")
+    return {
+        "perfil": perfil,
+        "agentes": await repo.listar_agentes(conta_id),
+    }
+
+
+@app.put("/api/admin/contas/{conta_id}")
+async def admin_atualizar_conta(conta_id: str, request: Request):
+    """Promove/rebaixa e/ou bloqueia uma conta."""
+    admin = exigir_admin(usuario_atual(request))
+    body = await request.json()
+    role = (body.get("role") or "usuario").strip()
+    if role not in ("admin", "usuario"):
+        raise HTTPException(400, "Papel inválido: use 'admin' ou 'usuario'.")
+    bloqueado = body.get("bloqueado")
+    if bloqueado is not None:
+        bloqueado = bool(bloqueado)
+
+    alvo = await repo.obter_perfil(conta_id)
+    if not alvo:
+        raise HTTPException(404, "Conta não encontrada.")
+
+    # Rebaixar ou bloquear o último admin tranca todo mundo fora do painel
+    # admin (o cliente não consegue trocar senha de papel, por diseño). Vale a
+    # pena barrar na API em vez de explicar depois que a conta ficou órfã.
+    perde_admin = alvo["role"] == "admin" and (role != "admin" or bloqueado is True)
+    if perde_admin and await repo.contar_admins() <= 1:
+        raise HTTPException(
+            400,
+            "Esta é a última conta de administrador ativa. Promova outra conta "
+            "para admin antes de rebaixar ou bloquear esta.",
+        )
+    if conta_id == admin.id and perde_admin:
+        raise HTTPException(400, "Você não pode rebaixar nem bloquear a própria conta de admin.")
+
+    atualizado = await repo.definir_papel(conta_id, role, bloqueado)
+    # O cache de 60 s do auth guardaria o papel antigo, então esta conta
+    # continuaria admin (ou desbloqueada) por até um minuto sem isso.
+    from app.auth import limpar_cache
+    limpar_cache(conta_id)
+    return atualizado
+
+
+@app.post("/api/admin/agentes/{agente_id}/transferir")
+async def admin_transferir_agente(agente_id: int, request: Request):
+    """Move um agente para outra conta. É como se resolve um agente criado sem
+    dono ou deixado órfão quando o cadastro do cliente é refeito."""
+    exigir_admin(usuario_atual(request))
+    body = await request.json()
+    dono = (body.get("dono_id") or "").strip() or None
+    if dono is not None and not await repo.obter_perfil(dono):
+        raise HTTPException(400, "Conta de destino não existe.")
+    if dono is not None:
+        existentes = await repo.listar_agentes(dono)
+        if len(existentes) >= MAX_CANAIS_POR_AGENTE:
+            raise HTTPException(400, "A conta de destino já tem o máximo de agentes.")
+    r = await repo.definir_dono_agente(agente_id, dono)
+    if not r:
+        raise HTTPException(404, "Agente não encontrado.")
+    return r
