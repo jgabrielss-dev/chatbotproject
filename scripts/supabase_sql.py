@@ -15,16 +15,21 @@ import re
 import sys
 
 PROMPT = pathlib.Path(__file__).resolve().parent.parent.parent / "prompt.txt"
+CREDENCIAIS = pathlib.Path(__file__).resolve().parent.parent.parent / "credentials.txt"
 REF = "ophhmvnascjpayoxqdkz"
 ENDPOINT = f"https://api.supabase.com/v1/projects/{REF}/database/query"
 
 
 def _cred(chave: str) -> str:
-    texto = PROMPT.read_text(encoding="utf-8")
-    m = re.search(rf"{chave}:\s*(\S+)", texto)
-    if not m:
-        raise SystemExit(f"'{chave}' nao encontrado em {PROMPT}")
-    return m.group(1)
+    # credentials.txt manda: o prompt.txt passou a guardar o log do navegador
+    # e ja nao tem mais as credenciais.
+    for arquivo in (CREDENCIAIS, PROMPT):
+        if not arquivo.exists():
+            continue
+        m = re.search(rf"{re.escape(chave)}:\s*(\S+)", arquivo.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1)
+    raise SystemExit(f"'{chave}' nao encontrada em {CREDENCIAIS.name} nem {PROMPT.name}")
 
 
 def sql(consulta: str) -> object:
