@@ -170,8 +170,8 @@
       throw new Error("Não foi possível falar com a API (" + Auth.API_BASE + "). " + tempo);
     }
     if (r.status === 401) {
-      console.warn("[api] 401 em", Auth.API_BASE + url, "- limpando sessao e indo para o login");
-      Auth.sair();
+      console.warn("[api] 401 em", Auth.API_BASE + url, "- sessao invalida, indo para o login");
+      Auth.irParaLogin();
       throw new Error("Sessão expirada. Entrando novamente…");
     }
     if (r.status === 403) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "Acesso negado."); }

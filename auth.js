@@ -53,16 +53,27 @@
   /** Para onde este usuário vai depois de entrar. */
   function destino(eu, redir) {
     if (redir && (redir !== "/admin" || eu.eh_admin)) {
-      if (!EM_PAGINA_ESTATICA) return redir;
-      // Mesmo caminho relativo de pagina(): "./" na frente, senao o Pages 404,
-      // e ".html" no fim, senao o Pages procura um arquivo chamado "painel".
-      var alvo = redir.replace(/^\.?\/*/, "").replace(/\.html$/, "");
-      return "./" + (alvo === "" ? "index.html" : alvo + ".html");
+      // O ?redir= pode ter vindo de uma visita ao GitHub Pages, onde o destino
+      // e "./admin.html". Devolvido cru no Render, esse ".html" nao existe la e
+      // o servidor respondia 401 em JSON — a tela em branca. Reduzimos para
+      // "/admin" ou "/painel" e ignoramos qualquer outra coisa.
+      var alvo = String(redir).replace(/^\.?\/*/, "").replace(/\.html$/, "").replace(/\/$/, "");
+      if (alvo === "") alvo = "index";
+      if (alvo !== "admin" && alvo !== "painel" && alvo !== "index" && alvo !== "login") {
+        return pagina(eu.eh_admin ? "admin" : "painel");
+      }
+      if (alvo === "login") return pagina("login");
+      // A home no Pages e "./index.html" (o dir listing ja serve, mas o
+      // "./index.html" explicito nao quebra em nenhum dos dois hosts).
+      if (alvo === "index") return EM_PAGINA_ESTATICA ? "./index.html" : "/";
+      // O Pages precisa do ".html"; o Render usa a rota sem extensão.
+      if (!EM_PAGINA_ESTATICA) return pagina(alvo);
+      return "./" + alvo + ".html";
     }
     return pagina(eu.eh_admin ? "admin" : "painel");
   }
 
-  /** Volta para a home mantendo o destino na sessionStorage, para o ?redir. */
+  /** Vai para o login guardando a pagina atual, para voltar depois de entrar. */
   function irParaLogin() {
     var atual = pagina(eu_admin_ou_painel_atual());
     location.replace(pagina("login") + "?redir=" + encodeURIComponent(atual));
@@ -281,6 +292,7 @@
     EM_PAGINA_ESTATICA: EM_PAGINA_ESTATICA,
     pagina: pagina,
     destino: destino,
+    irParaLogin: irParaLogin,
     config: config,
     obterSessao: obterSessao,
     cabecalhoAuth: cabecalhoAuth,

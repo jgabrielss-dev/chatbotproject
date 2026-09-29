@@ -741,7 +741,17 @@ _PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
 
 
 def _eh_publica(caminho: str) -> bool:
-    return caminho in _ROTAS_PUBLICAS or caminho.startswith(_PREFIXOS_PUBLICOS)
+    if caminho in _ROTAS_PUBLICAS or caminho.startswith(_PREFIXOS_PUBLICOS):
+        return True
+    # "/admin.html", "/login/" e companhia precisam contar como as mesmas rotas.
+    # Sem isso o middleware devolvia 401 em JSON e o browser pintava uma tela
+    # em branca no lugar do login — o usuario nao conseguia nem entrar na aba
+    # de login, porque a URL que o front construia nao existia aqui.
+    if caminho.endswith("/") and caminho[:-1] in _ROTAS_PUBLICAS:
+        return True
+    if caminho.endswith(".html") and caminho[: -len(".html")] in _ROTAS_PUBLICAS:
+        return True
+    return False
 
 
 @app.middleware("http")
@@ -815,6 +825,27 @@ async def pagina_admin():
 
 @app.get("/painel", include_in_schema=False)
 async def pagina_painel():
+    return FileResponse(PAINEL_HTML)
+
+
+# O front (e qualquer link salvo, favorito ou ?redir=) pode pedir a pagina com
+# ".html" ou barra final. Servir o mesmo arquivo nesses casos evita a tela em
+# branca do 401 em JSON.
+@app.get("/login/", include_in_schema=False)
+@app.get("/login.html", include_in_schema=False)
+async def pagina_login_variacoes():
+    return FileResponse(LOGIN_HTML)
+
+
+@app.get("/admin/", include_in_schema=False)
+@app.get("/admin.html", include_in_schema=False)
+async def pagina_admin_variacoes():
+    return FileResponse(ADMIN_HTML)
+
+
+@app.get("/painel/", include_in_schema=False)
+@app.get("/painel.html", include_in_schema=False)
+async def pagina_painel_variacoes():
     return FileResponse(PAINEL_HTML)
 
 

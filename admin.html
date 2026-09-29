@@ -166,10 +166,11 @@ const api = async (url, opts = {}, tentativa = 0) => {
     );
   }
   if (r.status === 401) {
-    // Token velho guardado no localStorage: o mais comum depois de trocar de
-    // conta. A sessao e limpa e o pessoa vai para o login, sem teimosia.
-    console.warn("[api] 401 em", API_BASE + url, "- limpando sessao e indo para o login");
-    Auth.sair();
+    // Token velho no localStorage e o caso mais comum depois de trocar de conta.
+    // Vai para o login preservando a volta, e sem passar por Auth.sair() — que
+    // mandava para a home e criava uma ida-e-volta em vez de mostrar o login.
+    console.warn("[api] 401 em", API_BASE + url, "- sessao invalida, indo para o login");
+    Auth.irParaLogin();
     throw new Error("Sessão expirada. Entrando novamente…");
   }
   if (!r.ok) {

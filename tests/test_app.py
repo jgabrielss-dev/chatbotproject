@@ -453,6 +453,27 @@ if tem_testclient:
         r = c.get(rota)
         check(f"{rota} e publica", r.status_code == 200, f"HTTP {r.status_code}")
 
+    # A mesma pagina alcancavel por "/admin", "/admin/" e "/admin.html". Sem as
+    # tres, o middleware devolvia 401 em JSON e o browser mostrava a tela em
+    # branca no lugar do login -- e o usuario nao conseguia nem entrar na aba.
+    c = _com_auth()
+    for base in ("/admin", "/login", "/painel"):
+        for variante in (base + "/", base + ".html"):
+            r = c.get(variante)
+            check(f"{variante} entrega HTML, nao 401 em JSON",
+                  r.status_code == 200 and "text/html" in r.headers.get("content-type", ""),
+                  f"HTTP {r.status_code} {r.headers.get('content-type', '')}")
+
+    # O ?redir= volta cru do sessionStorage e virava "/admin.html" no Render,
+    # rota que nao existia. destino() tem de reduzir para a rota do host.
+    import re as _re
+    _m = _re.search(r"function destino\(eu, redir\) \{(.*?)\n  \}", auth_js, _re.S)
+    _corpo = _m.group(1) if _m else ""
+    check("destino() normaliza o .html do Pages para a rota do Render",
+          'replace(/\\.html$/, "")' in _corpo and "EM_PAGINA_ESTATICA) return pagina(alvo)" in _corpo)
+    check("destino() so aceita destino conhecido (nao vaza URL externa)",
+          'alvo !== "admin" && alvo !== "painel"' in _corpo)
+
     # "/" e a home de venda e "/login" e o formulario: a confusao entre os dois
     # trocaria o login por texto de venda, ou o contrario.
     c = _com_auth()
