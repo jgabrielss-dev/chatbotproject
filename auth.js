@@ -28,6 +28,7 @@
    * E o caminho tem de ser RELATIVO, não "/auth.js": um site de projeto do
    * Pages é servido em ".../chatbotproject/", então "/auth.js" pediria
    * "https://jgabrielss-dev.github.io/auth.js" e daria 404.
+   */
 
   var CHAVE_USUARIO = "chatbotproject.usuario";
   var _sessao = null;
@@ -43,14 +44,20 @@
       // o ".html"; mandar index.html ali funciona, mas a URL fica feia.
       return EM_PAGINA_ESTATICA ? "./" : "/";
     }
-    return EM_PAGINA_ESTATICA ? "/" + nome + ".html" : "/" + nome;
+    // "./admin.html" e nao "/admin.html": o Pages serve o site de projeto em
+    // ".../<repo>/", entao a barra a esquerda apontaria para a raiz do dominio,
+    // fora do repo, e daria 404.
+    return EM_PAGINA_ESTATICA ? "./" + nome + ".html" : "/" + nome;
   }
 
   /** Para onde este usuário vai depois de entrar. */
   function destino(eu, redir) {
     if (redir && (redir !== "/admin" || eu.eh_admin)) {
-      return EM_PAGINA_ESTATICA ? redir.replace(/\/?$/, ".html").replace(".html.html", ".html")
-                                : redir;
+      if (!EM_PAGINA_ESTATICA) return redir;
+      // Mesmo caminho relativo de pagina(): "./" na frente, senao o Pages 404,
+      // e ".html" no fim, senao o Pages procura um arquivo chamado "painel".
+      var alvo = redir.replace(/^\.?\/*/, "").replace(/\.html$/, "");
+      return "./" + (alvo === "" ? "index.html" : alvo + ".html");
     }
     return pagina(eu.eh_admin ? "admin" : "painel");
   }
@@ -186,6 +193,13 @@
             guardarToken(d.access_token);
             _sessao = null;
             return { ok: true, entrou: true, mensagem: "Conta criada. Bem-vindo!" };
+          }
+          // 422 com "already registered" é o caso real de quem já tem conta e
+          // clica em "Criar conta" por engano. Sem tratar, a tela mostra
+          // "conta criada" e a pessoa tenta entrar sem nunca ter senha.
+          if (r.status === 422 && /already|registered|exists/i.test(
+              (d.error_description || d.msg || ""))) {
+            throw new Error("Já existe uma conta com esse e-mail. Tente entrar.");
           }
           if (r.ok || r.status === 422) {
             return {

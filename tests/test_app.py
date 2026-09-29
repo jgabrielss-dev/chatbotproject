@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import os
 import re
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -240,6 +241,67 @@ check("formulario do Instagram so tem o campo sessionid",
 src_main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
 src_config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
+print("\n== encoding: nenhum caractere corrompido em nenhuma tela ==")
+# Sintoma reportado: "caracteres estranhos em todo o site". Cada arquivo tinha
+# um codepage diferente de corrupcao, e o sinal e um PAR (Ã seguido de byte de
+# continuacao), nao um acento so — 'é' legitimo cai na mesma faixa de 'Ã'.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    "corrigir_encoding", ROOT / "scripts" / "corrigir_encoding.py")
+_corr = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_corr)
+for _nome in ("index.html", "login.html", "admin.html", "painel.html", "auth.js"):
+    _t = (ROOT / _nome).read_text(encoding="utf-8")
+    _resto = _corr.Rastro.findall(_t)
+    check(f"{_nome} sem mojibake", not _resto,
+          f"{len(_resto)} rastro(s): {sorted(set(_resto))[:6]}")
+    _legais = [c for c in _t if ord(c) > 0x7F]
+    check(f"{_nome} preservou os acentos do portugues", len(_legais) > 20,
+          "so restaram ASCII: o conserto pode ter apagado acento em vez de "
+          "acertar, e isso passa despercebido")
+
+print("\n== o JS roda mesmo, e nao so passa no 'node --check' ==")
+_js = r"""
+global.window = global;
+global.location = { protocol: "https:", hostname: "jgabrielss-dev.github.io",
+                    search: "", pathname: "/chatbotproject/" };
+global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+global.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+require(process.argv[2]);
+// Um '/*' que nunca fecha engole as 'var' seguintes: o arquivo continua
+// sintaticamente valido (node --check passa) e so quebra em runtime, com
+// ReferenceError. Por isso este teste EXECUTA o arquivo, e nao conta
+// comentarios. Contar nao serve: o '/auth/v1/*' do comentario de cabecalho e o
+// '/\/*/' de uma regex contain '/*' sem abrir nada.
+const casos = [
+  [{ eh_admin: false }, "/painel", "./painel.html"],
+  [{ eh_admin: true },  "/admin",  "./admin.html"],
+  [{ eh_admin: false }, "admin.html", "./admin.html"],
+  [{ eh_admin: false }, "/",       "./index.html"],
+];
+for (const [eu, entra, quer] of casos) {
+  const got = Auth.destino(eu, entra);
+  if (got !== quer) { console.log("DESTINO " + entra + " = " + got + " (esperado " + quer + ")"); process.exit(3); }
+}
+// Guarda de seguranca: cliente comum que tentar /admin volta para o painel dele.
+const guardado = Auth.destino({ eh_admin: false }, "/admin");
+if (guardado !== "./painel.html") { console.log("GUARDA /admin = " + guardado); process.exit(5); }
+// Se algum 'var' estiver comentado, obterSessao estoura aqui.
+Auth.obterSessao().then(() => console.log("OK")).catch(e => { console.log("ERRO: " + e.message); process.exit(4); });
+"""
+_arq = ROOT / "tests" / "_probe_auth.js"
+_arq.write_text(_js, encoding="utf-8")
+try:
+    _p = subprocess.run(["node", str(_arq), str(ROOT / "auth.js")],
+                        capture_output=True, text=True, timeout=90)
+    check("auth.js carrega e roda no Pages", "OK" in _p.stdout,
+          (_p.stdout + _p.stderr).strip()[:220])
+    check("Auth.destino devolve caminho RELATIVO no Pages",
+          "DESTINO" not in _p.stdout and "GUARDA" not in _p.stdout,
+          [l for l in _p.stdout.splitlines() if "DESTINO" in l or "GUARDA" in l][:3])
+finally:
+    _arq.unlink(missing_ok=True)
+
 print("\n== as quatro telas existem e nao confiam no ADMIN_TOKEN ==")
 # As telas moram na RAIZ do repo: o GitHub Pages publica um site de projeto em
 # ".../<repo>/", que so encontra o que esta na raiz. Copia em app/static/ foi o
@@ -286,6 +348,16 @@ check("a tela de login tem login, cadastro e recuperacao de senha",
 check("a tela de login usa Auth.destino, que sabe a diferenca entre os hosts",
       "Auth.destino(eu)" in login and "Auth.destino(eu, alvo)" in login)
 
+# Recuperar senha nao tem senha. Se o campo continuar required, o navegador
+# bloqueia o submit antes do JS rodar e o botao parece nao funcionar.
+check("'esqueci minha senha' tira a senha de cena",
+      'id="blocoSenha"' in login and 'classList.toggle("hidden", soEmail)' in login
+      and '$("senha").required = !soEmail' in login)
+check("o botao diz 'Enviar link' no modo recuperar, e nao 'Entrar'",
+      'recuperar: "Enviar link"' in login and 'ROTULO[modo]' in login)
+check("a tela de login diz quando o e-mail nao chegou por cota do SMTP",
+      "not confirmed" in login and "rate limit" in login.lower())
+
 # O GitHub Pages nao tem servidor: "/admin" la vira um pedido de arquivo
 # chamado admin e devolve 404. O caminho tambem tem de ser RELATIVO, porque o
 # Pages serve o site de projeto em ".../<repo>/" e "/auth.js" apontaria para a
@@ -293,7 +365,9 @@ check("a tela de login usa Auth.destino, que sabe a diferenca entre os hosts",
 check("o auth.js sabe quando esta em pagina estatica",
       "EM_PAGINA_ESTATICA" in auth_js and "github\\.io" in auth_js)
 check("o auth.js decide entre /admin e /admin.html",
-      'EM_PAGINA_ESTATICA ? "/" + nome + ".html" : "/" + nome' in auth_js)
+      'EM_PAGINA_ESTATICA ? "./" + nome + ".html" : "/" + nome' in auth_js,
+      "o caminho do Pages precisa ser RELATIVO: '/admin.html' vira 404 porque "
+      "aponta para a raiz do dominio, fora do repo")
 for nome, texto in (("admin", painel_admin), ("home", home),
                     ("login", login), ("painel", painel_cli)):
     check(f"{nome}.html usa caminho RELATIVO nos assets (o Pages exige)",

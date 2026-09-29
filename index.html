@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chatbot Project Â· Atendimento com IA no Telegram, WhatsApp e Instagram</title>
+<title>Chatbot Project · Atendimento com IA no Telegram, WhatsApp e Instagram</title>
 <meta name="description" content="Crie chatbots que atendem seus clientes no Telegram, WhatsApp e Instagram. Um menu por conta, conversas e a memoria de cada cliente.">
 <link rel="stylesheet" href="style.css">
 <style>
-  /* A home Ã© uma pÃ¡gina de venda, nÃ£o o painel: o style.css do painel Ã© grid com
-     sidebar, entÃ£o aqui neutralizo o grid e uso coluna central. */
+  /* A home é uma página de venda, não o painel: o style.css do painel é grid com
+     sidebar, então aqui neutralizo o grid e uso coluna central. */
   body.venda { display: block; background: var(--bg); }
   .venda-wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 72px; }
 
@@ -62,34 +62,34 @@
   </header>
 
   <section class="hero">
-    <h1>Seu bot atende. VocÃª acompanha tudo.</h1>
+    <h1>Seu bot atende. Você acompanha tudo.</h1>
     <p class="lead">
       Um chatbot que responde no Telegram, WhatsApp e Instagram, com as conversas
-      salvas e a memÃ³ria do que ele aprendeu de cada cliente. Cada conta tem o seu
+      salvas e a memória do que ele aprendeu de cada cliente. Cada conta tem o seu
       painel, separado do dos outros.
     </p>
     <div class="cta">
-      <a class="btn primary" href="login.html">Criar conta grÃ¡tis</a>
-      <a class="btn" href="login.html">JÃ¡ tenho conta</a>
+      <a class="btn primary" href="login.html">Criar conta grátis</a>
+      <a class="btn" href="login.html">Já tenho conta</a>
     </div>
-    <p class="nota">Criar a conta leva menos de um minuto. VocÃª confirma o e-mail e entra.</p>
+    <p class="nota">Criar a conta leva menos de um minuto. Você confirma o e-mail e entra.</p>
   </section>
 
   <section class="grade">
     <div class="recurso">
-      <div class="icone">ðŸ’¬</div>
-      <h3>Um menu sÃ³ seu</h3>
-      <p>Agentes, canais e conversas ficam na sua conta. NinguÃ©m mais vÃª o que Ã© seu.</p>
+      <div class="icone">💬</div>
+      <h3>Um menu só seu</h3>
+      <p>Agentes, canais e conversas ficam na sua conta. Ninguém mais vê o que é seu.</p>
     </div>
     <div class="recurso">
-      <div class="icone">ðŸ§ </div>
-      <h3>MemÃ³ria do cliente</h3>
+      <div class="icone">🧠</div>
+      <h3>Memória do cliente</h3>
       <p>O bot extrai o que aprendeu de cada pessoa e usa na conversa seguinte.</p>
     </div>
     <div class="recurso">
-      <div class="icone">ðŸ“¡</div>
+      <div class="icone">📡</div>
       <h3>Todos os canais</h3>
-      <p>Telegram, WhatsApp, Instagram e webhook, com fila que nÃ£o perde mensagem.</p>
+      <p>Telegram, WhatsApp, Instagram e webhook, com fila que não perde mensagem.</p>
     </div>
   </section>
 
@@ -99,37 +99,37 @@
       <div class="passo">
         <div class="n">1</div>
         <h3>Crie sua conta</h3>
-        <p>Com o seu e-mail. A confirmaÃ§Ã£o chega na hora.</p>
+        <p>Com o seu e-mail. A confirmação chega na hora.</p>
       </div>
       <div class="passo">
         <div class="n">2</div>
         <h3>Crie um agente</h3>
-        <p>VocÃª escolhe a personalidade e o que ele deve fazer.</p>
+        <p>Você escolhe a personalidade e o que ele deve fazer.</p>
       </div>
       <div class="passo">
         <div class="n">3</div>
         <h3>Conecte um canal</h3>
-        <p>Escaneia o QR do WhatsApp ou liga o Telegram. O bot comeÃ§a a responder.</p>
+        <p>Escaneia o QR do WhatsApp ou liga o Telegram. O bot começa a responder.</p>
       </div>
     </div>
   </section>
 
   <footer class="rodape">
     <span>Chatbot Project</span>
-    <span><a href="login.html">Entrar</a> Â· <a href="login.html">Criar conta</a></span>
+    <span><a href="login.html">Entrar</a> · <a href="login.html">Criar conta</a></span>
   </footer>
 
 </div>
 
 <script src="auth.js"></script>
 <script>
-  // Quem jÃ¡ tem sessÃ£o nÃ£o deveria ver a pÃ¡gina de venda: vai direto para o
-  // painel que o papel permite. Sem sessÃ£o, fica aqui â€” Ã© sÃ³ um GET em
-  // /api/eu, e a home Ã© pÃºblica justamente para nÃ£o exigir login.
+  // Quem já tem sessão não deveria ver a página de venda: vai direto para o
+  // painel que o papel permite. Sem sessão, fica aqui — é só um GET em
+  // /api/eu, e a home é pública justamente para não exigir login.
   Auth.obterSessao().then(function (eu) {
     if (eu) location.replace(Auth.destino(eu));
   }).catch(function () {
-    // Falhou em validar a sessÃ£o (servidor acordando, rede): fica na home.
+    // Falhou em validar a sessão (servidor acordando, rede): fica na home.
   });
 </script>
 </body>

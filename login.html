@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chatbot Project Â· Seus chatbots, suas contas</title>
+<title>Chatbot Project · Seus chatbots, suas contas</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* Layout da home. O style.css Ã© o do painel (grid com sidebar), entÃ£o a home
+  /* Layout da home. O style.css é o do painel (grid com sidebar), então a home
      precisa neutralizar esse grid e usar uma coluna central. */
   body.home { display: block; }
   .home-wrap { max-width: 460px; margin: 0 auto; padding: 48px 20px 64px; }
@@ -22,6 +22,8 @@
   .alternar { margin-top: 16px; text-align: center; font-size: 13px; }
   .alternar button { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; }
   .erro { color: var(--danger); font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .dica { color: var(--muted); font-size: 13px; margin-top: 6px; min-height: 18px; }
+  .hidden { display: none; }
   .recursos { margin-top: 34px; border-top: 1px solid var(--border); padding-top: 18px; }
   .recursos h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .recursos ul { padding-left: 18px; margin: 8px 0 0; }
@@ -44,10 +46,13 @@
       <label for="email">E-mail</label>
       <input type="email" id="email" required autocomplete="email" placeholder="voce@empresa.com">
 
-      <label for="senha">Senha</label>
-      <input type="password" id="senha" required autocomplete="current-password" placeholder="mÃ­nimo de 6 caracteres">
+      <div id="blocoSenha">
+        <label for="senha">Senha</label>
+        <input type="password" id="senha" required autocomplete="current-password" placeholder="mínimo de 6 caracteres">
+      </div>
 
       <div class="erro" id="erro"></div>
+      <div class="dica" id="dica"></div>
 
       <div class="acoes">
         <button class="btn primary" id="btnEnviar" type="submit">Entrar</button>
@@ -58,9 +63,9 @@
   </div>
 
   <div class="recursos">
-    <h3>O que vocÃª tem aqui</h3>
+    <h3>O que você tem aqui</h3>
     <ul>
-      <li>Um menu sÃ³ com <strong>os seus</strong> agentes e canais.</li>
+      <li>Um menu só com <strong>os seus</strong> agentes e canais.</li>
       <li>Conversas e o que o bot aprendeu de cada cliente.</li>
       <li>Telegram, WhatsApp, Instagram e webhooks.</li>
     </ul>
@@ -73,28 +78,45 @@
   const $ = (id) => document.getElementById(id);
   let modo = "entrar";   // "entrar" | "criar" | "recuperar"
 
-  // JÃ¡ logado? Vai direto para a tela certa, sem passar pelo formulÃ¡rio.
+  // Já logado? Vai direto para a tela certa, sem passar pelo formulário.
   const eu = await Auth.obterSessao();
   if (eu) {
     location.replace(Auth.destino(eu));
     return;
   }
 
-  // O painel manda aqui com ?redir=/painel para voltar aonde o usuÃ¡rio estava.
+  // O painel manda aqui com ?redir=/painel para voltar aonde o usuário estava.
   const redir = new URLSearchParams(location.search).get("redir");
   if (redir) {
     try { sessionStorage.setItem("chatbotproject.redir", redir); } catch (e) {}
   }
 
+  const ROTULO = { entrar: "Entrar", criar: "Criar conta", recuperar: "Enviar link" };
+
   function trocar(modoNovo) {
     modo = modoNovo;
     $("erro").textContent = "";
+    $("erro").style.color = "var(--danger)";
     $("abaEntrar").classList.toggle("on", modo === "entrar");
     $("abaCriar").classList.toggle("on", modo === "criar");
-    $("btnEnviar").textContent = modo === "criar" ? "Criar conta" : "Entrar";
+
+    // Recuperar senha nao tem senha: o campo precisa sair de cena e perder o
+    // "required". Sem isso o navegador bloqueia o envio antes do JS rodar, e o
+    // botao "Esqueci minha senha" parece quebrado.
+    const soEmail = modo === "recuperar";
+    $("blocoSenha").classList.toggle("hidden", soEmail);
+    $("senha").required = !soEmail;
+    if (soEmail) $("senha").value = "";
+
+    $("btnEnviar").textContent = ROTULO[modo];
+    $("btnEnviar").disabled = false;
     $("senha").autocomplete = modo === "criar" ? "new-password" : "current-password";
+    $("dica").textContent = soEmail
+      ? "Enviamos um link de redefinição para o seu e-mail."
+      : "";
+
     $("alternar").innerHTML = modo === "criar"
-      ? 'JÃ¡ tem conta? <button type="button" data-modo="entrar">Entrar</button>'
+      ? 'Já tem conta? <button type="button" data-modo="entrar">Entrar</button>'
       : '<button type="button" data-modo="recuperar">Esqueci minha senha</button>';
     for (const b of $("alternar").querySelectorAll("button")) {
       b.onclick = () => trocar(b.dataset.modo);
@@ -122,34 +144,64 @@
     ev.preventDefault();
     $("erro").textContent = "";
     $("btnEnviar").disabled = true;
-    $("btnEnviar").textContent = "â€¦";
+    $("btnEnviar").textContent = "…";
     const email = $("email").value.trim();
     const senha = $("senha").value;
     try {
       if (modo === "recuperar") {
-        await Auth.recuperar(email);
-        $("erro").style.color = "var(--muted)";
-        $("erro").textContent = "Se houver uma conta com esse e-mail, o link de recuperaÃ§Ã£o foi enviado.";
+        try {
+          await Auth.recuperar(email);
+          $("erro").style.color = "var(--muted)";
+          $("erro").textContent = "Se houver uma conta com esse e-mail, o link de recuperação foi enviado.";
+        } catch (e) {
+          // 429 do GoTrue = cota de e-mail estourada (SMTP sem cota real). Sem
+          // dizer isso, o usuario acha que o e-mail foi enviado e fica
+          // esperando por algo que nunca sai.
+          const semSmtp = /rate limit|429/i.test(e.message || "");
+          $("erro").style.color = semSmtp ? "var(--danger)" : "var(--danger)";
+          $("erro").textContent = semSmtp
+            ? "O servidor de e-mail está no limite de envios. Tente de novo em alguns minutos ou fale com o suporte."
+            : (e.message || "Não foi possível enviar o e-mail.");
+        }
         return;
       }
       if (modo === "criar") {
         if (senha.length < 6) { $("erro").textContent = "A senha precisa de ao menos 6 caracteres."; return; }
         const r = await Auth.cadastrar(email, senha);
         if (!r.entrou) {
+          // A conta foi criada mas o e-mail de confirmacao nao chegou. Dizer
+          // isso e melhor do que trocar de aba e deixar o usuario tentando
+          // entrar com uma conta que o servidor ainda marca como nao
+          // confirmada.
           $("erro").style.color = "var(--muted)";
           $("erro").textContent = r.mensagem;
           trocar("entrar");
+          $("erro").textContent = r.mensagem;
           return;
         }
         const eu = await Auth.obterSessao();
         location.replace(destino(eu));
         return;
       }
-      const eu = await Auth.entrar(email, senha);
+      let eu;
+      try {
+        eu = await Auth.entrar(email, senha);
+      } catch (e) {
+        // O GoTrue diz "Email not confirmed" quando a conta existe mas o
+        // e-mail nunca chegou. Sem tratar, o usuario le "E-mail ou senha
+        // invalidos" e pensa que digitou a senha errada.
+        if (/not confirmed/i.test(e.message || "")) {
+          $("erro").textContent =
+            "Esta conta ainda não foi confirmada. O e-mail de confirmação não chegou — refaça o cadastro ou peça um novo link.";
+        } else {
+          $("erro").textContent = e.message || "Não foi possível entrar.";
+        }
+        return;
+      }
       location.replace(destino(eu));
     } catch (e) {
       $("erro").style.color = "var(--danger)";
-      $("erro").textContent = e.message || "NÃ£o foi possÃ­vel continuar.";
+      $("erro").textContent = e.message || "Não foi possível continuar.";
     } finally {
       $("btnEnviar").disabled = false;
       $("btnEnviar").textContent = modo === "criar" ? "Criar conta" : "Entrar";

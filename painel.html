@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Meus chatbots Â· Chatbot Project</title>
+<title>Meus chatbots · Chatbot Project</title>
 <link rel="stylesheet" href="style.css">
 <style>
   /* O style.css do admin tem grid com sidebar. Aqui a sidebar vira barra de
-     topo, porque o cliente navega por seÃ§Ãµes e nÃ£o por uma lista de agentes. */
+     topo, porque o cliente navega por seções e não por uma lista de agentes. */
   body.painel { grid-template-columns: 1fr; }
   .topo { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
           border-bottom: 1px solid var(--border); padding: 12px 0 14px; }
@@ -35,7 +35,7 @@
 <div class="topo">
   <h1>Meus chatbots</h1>
   <div class="row">
-    <button class="btn sm on" data-tela="visao">VisÃ£o geral</button>
+    <button class="btn sm on" data-tela="visao">Visão geral</button>
     <button class="btn sm" data-tela="agentes">Agentes</button>
     <button class="btn sm" data-tela="conversas">Conversas</button>
     <button class="btn sm" data-tela="canais">Canais</button>
@@ -51,12 +51,12 @@
     <div class="card">
       <h2>Resumo</h2>
       <div class="nums" id="nums">
-        <p class="muted">carregandoâ€¦</p>
+        <p class="muted">carregando…</p>
       </div>
     </div>
     <div class="card">
       <h2>Fila de mensagens</h2>
-      <div id="caixa"><p class="muted">carregandoâ€¦</p></div>
+      <div id="caixa"><p class="muted">carregando…</p></div>
     </div>
   </section>
 
@@ -67,10 +67,10 @@
         <button class="btn sm primary" id="btnNovoAgente">+ Novo agente</button>
       </div>
       <p class="muted">
-        Agente = o cÃ©rebro do bot: nome, instruÃ§Ã£o e memÃ³ria. O canal Ã© por onde
+        Agente = o cérebro do bot: nome, instrução e memória. O canal é por onde
         ele atende.
       </p>
-      <div id="agentes"><p class="muted">carregandoâ€¦</p></div>
+      <div id="agentes"><p class="muted">carregando…</p></div>
     </div>
   </section>
 
@@ -96,7 +96,7 @@
     <div class="card">
       <h2>Canais</h2>
       <p class="muted">Onde seus agentes atendem.</p>
-      <div id="canais"><p class="muted">carregandoâ€¦</p></div>
+      <div id="canais"><p class="muted">carregando…</p></div>
     </div>
   </section>
 
@@ -106,21 +106,21 @@
 
 <div class="hidden" id="gate">
   <div class="card">
-    <h2>Carregandoâ€¦</h2>
+    <h2>Carregando…</h2>
     <p class="muted" id="gateErro"></p>
   </div>
 </div>
 
-<!-- FormulÃ¡rio de agente. O cliente mexe sÃ³ em nome e instruÃ§Ã£o: canal Ã©
-     assunto do admin (Evolution e Instagram nÃ£o-oficial exigem infraestrutura
-     da plataforma), entÃ£o a escolha fica no painel admin. -->
+<!-- Formulário de agente. O cliente mexe só em nome e instrução: canal é
+     assunto do admin (Evolution e Instagram não-oficial exigem infraestrutura
+     da plataforma), então a escolha fica no painel admin. -->
 <div class="hidden" id="agenteForm">
   <div class="card">
     <h2 id="agenteFormTitulo">Novo agente</h2>
     <label for="agNome">Nome</label>
-    <input type="text" id="agNome" placeholder="Atendimento, Vendasâ€¦">
-    <label for="agPrompt">InstruÃ§Ã£o (prompt)</label>
-    <textarea id="agPrompt" rows="8" placeholder="VocÃª Ã© o assistente da empresa X. Responda em portuguÃªs, seja diretoâ€¦"></textarea>
+    <input type="text" id="agNome" placeholder="Atendimento, Vendas…">
+    <label for="agPrompt">Instrução (prompt)</label>
+    <textarea id="agPrompt" rows="8" placeholder="Você é o assistente da empresa X. Responda em português, seja direto…"></textarea>
     <label class="row" style="margin-top:8px">
       <input type="checkbox" id="agAtivo" checked style="width:auto"> Ativo
     </label>
@@ -157,7 +157,7 @@
     return d;
   };
 
-  // ---- sessÃ£o -----------------------------------------------------------
+  // ---- sessão -----------------------------------------------------------
   const eu = await Auth.obterSessao();
   if (!eu) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
   if (eu.eh_admin) { location.replace(Auth.pagina("admin")); throw new Error("e admin"); }
@@ -165,7 +165,7 @@
   $("btnSair").onclick = () => Auth.sair();
   Auth.esconderGate();
 
-  // ---- navegaÃ§Ã£o --------------------------------------------------------
+  // ---- navegação --------------------------------------------------------
   for (const b of document.querySelectorAll("[data-tela]")) {
     b.onclick = () => {
       for (const x of document.querySelectorAll("[data-tela]")) x.classList.remove("on");
@@ -178,29 +178,29 @@
     };
   }
 
-  // ---- visÃ£o geral ------------------------------------------------------
+  // ---- visão geral ------------------------------------------------------
   async function carregarResumo() {
     try {
       const r = await api("/api/painel/resumo");
       const e = r.estatisticas || {};
       $("nums").innerHTML = [
         ["agentes", e.agentes], ["canais", e.canais],
-        ["sessÃµes", e.sessoes], ["mensagens", e.mensagens],
+        ["sessões", e.sessoes], ["mensagens", e.mensagens],
         ["respostas 7 dias", e.respostas_7d], ["na fila", e.fila_pendente],
       ].map(([k, v]) => `<div class="num"><b>${v ?? 0}</b><span>${k}</span></div>`).join("");
 
       // resumo_caixa devolve {contagem:{status:n}, recentes:[...], problemas:[...]}.
-      // Mostramos os problemas (o que estÃ¡ travado) e nÃ£o sÃ³ a contagem.
+      // Mostramos os problemas (o que está travado) e não só a contagem.
       const c = r.caixa || {};
       const pend = (c.recentes || []).filter((i) => i.status !== "ok");
       $("caixa").innerHTML = pend.length
         ? pend.map((i) => `
              <div class="sessao">
-               <h3>${esc(i.remetente || "â€”")}</h3>
+               <h3>${esc(i.remetente || "—")}</h3>
                <p class="mem">${esc((i.texto || "").slice(0, 160))}</p>
-               <p class="mem">${esc(i.canal_nome || "")} Â· ${esc(i.status || "")}</p>
+               <p class="mem">${esc(i.canal_nome || "")} · ${esc(i.status || "")}</p>
              </div>`).join("")
-        : '<p class="vazio">Nada pendente. Suas mensagens estÃ£o sendo atendidas.</p>';
+        : '<p class="vazio">Nada pendente. Suas mensagens estão sendo atendidas.</p>';
     } catch (e) {
       $("nums").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
     }
@@ -217,8 +217,8 @@
           <div class="row" style="justify-content:space-between">
             <div>
               <h3>${esc(a.nome)}</h3>
-              <p class="mem">${a.ativo ? "ativo" : "inativo"} Â·
-                ${a.sessoes || 0} sessÃµes Â· ${a.canais || 0} canais</p>
+              <p class="mem">${a.ativo ? "ativo" : "inativo"} ·
+                ${a.sessoes || 0} sessões · ${a.canais || 0} canais</p>
             </div>
             <div class="row">
               <button class="btn sm" data-editar="${a.id}">Editar</button>
@@ -226,7 +226,7 @@
             </div>
           </div>
         </div>`).join("")
-        : '<p class="vazio">VocÃª ainda nÃ£o tem agentes. Crie o primeiro com o botÃ£o acima.</p>';
+        : '<p class="vazio">Você ainda não tem agentes. Crie o primeiro com o botão acima.</p>';
 
       for (const b of $("agentes").querySelectorAll("[data-editar]")) {
         b.onclick = () => abrirForm(lista.find((a) => a.id == b.dataset.editar));
@@ -255,7 +255,7 @@
     const nome = $("agNome").value.trim();
     const system_prompt = $("agPrompt").value.trim();
     if (!nome) { toast("Informe um nome.", "err"); return; }
-    if (!system_prompt) { toast("Informe a instruÃ§Ã£o do agente.", "err"); return; }
+    if (!system_prompt) { toast("Informe a instrução do agente.", "err"); return; }
     const btn = $("agSalvar");
     btn.disabled = true;
     try {
@@ -280,10 +280,10 @@
   };
 
   async function excluir(id) {
-    if (!confirm("Excluir este agente? Os canais e conversas dele vÃ£o junto. NÃ£o dÃ¡ para desfazer.")) return;
+    if (!confirm("Excluir este agente? Os canais e conversas dele vão junto. Não dá para desfazer.")) return;
     try {
       await api("/api/agentes/" + id, { method: "DELETE" });
-      toast("Agente excluÃ­do.");
+      toast("Agente excluído.");
       await carregarAgentes();
       await carregarResumo();
     } catch (e) {
@@ -312,19 +312,19 @@
     try {
       const lista = await api("/api/painel/agentes/" + agenteId + "/sessoes");
       $("sessoes").innerHTML = lista.length ? lista.map((s) => {
-        // memoria Ã© JSONB jÃ¡ parseado: guardamos um resumo estruturado do que a
-        // IA extraiu do cliente (nome, preferÃªncia, pedido em andamento...).
+        // memoria é JSONB já parseado: guardamos um resumo estruturado do que a
+        // IA extraiu do cliente (nome, preferência, pedido em andamento...).
         const mem = s.memoria || {};
         const resumo = Object.entries(mem)
           .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
-          .join(" Â· ");
+          .join(" · ");
         return `
         <div class="sessao">
           <div class="row" style="justify-content:space-between">
             <div>
-              <h3>${esc(s.usuario_externo || "â€”")}</h3>
-              <p class="mem">${s.mensagens || 0} mensagens Â·
-                ${s.atualizado_em ? "Ãºltima " + new Date(s.atualizado_em).toLocaleString("pt-BR") : "sem mensagens"}</p>
+              <h3>${esc(s.usuario_externo || "—")}</h3>
+              <p class="mem">${s.mensagens || 0} mensagens ·
+                ${s.atualizado_em ? "última " + new Date(s.atualizado_em).toLocaleString("pt-BR") : "sem mensagens"}</p>
               ${resumo ? `<p class="mem">${esc(resumo.slice(0, 300))}</p>` : ""}
             </div>
             <button class="btn sm" data-sessao="${s.id}">Abrir</button>
@@ -364,7 +364,7 @@
       $("canais").innerHTML = lista.length ? lista.map((c) => `
         <div class="sessao">
           <h3>${esc(c.nome)}</h3>
-          <p class="mem">${esc(c.tipo)} Â· ${c.ativo ? "ativo" : "inativo"}</p>
+          <p class="mem">${esc(c.tipo)} · ${c.ativo ? "ativo" : "inativo"}</p>
         </div>`).join("")
         : '<p class="vazio">Nenhum canal. Fale com o suporte para ativar um.</p>';
     } catch (e) {
