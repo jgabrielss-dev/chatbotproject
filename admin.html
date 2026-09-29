@@ -139,28 +139,38 @@ const api = async (url, opts = {}, tentativa = 0) => {
     r = await fetch(API_BASE + url, {
       ...opts,
       headers: { "Content-Type": "application/json", ...cabecalhoAuth(), ...(opts.headers || {}) },
+      // Sem timeout o "Failed to fetch" fica indefinido: pode ser o Render
+      // frio, mas tb pode ser token velho, extensao ou proxy. O motivo real
+      // vai na tela e no console, em vez de a gente adivinhar "hibernacao".
+      signal: AbortSignal.timeout(90_000),
     });
   } catch (e) {
-    // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda está
-    // acordando do hibernamento do plano grátis. O cold start do plano grátis
-    // leva 30-60s, muito mais que os 3s de uma retentativa normal, então a
-    // primeira espera é longa de propósito.
+    // "Failed to fetch" e o timeout sao genericos: o Render frio e uma causa
+    // possivel, mas nao a unica (token velho, extensao, proxy, DNS). Nao da
+    // para distinguir daqui, entao mostramos o motivo real em vez de cravar
+    // "hibernacao" -- o diagnostico errado atrasou a correcao.
+    const urlCheia = API_BASE + url;
+    console.error("[api] falhou em", urlCheia, "tentativa", tentativa + 1, "->", e);
     if (tentativa < 3) {
       const esperas = [5000, 15000, 35000];
       if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
-      if (tentativa === 1) toast("Render acordando do hibernamento, aguarde…", "err");
+      if (tentativa === 1) toast("Ainda sem resposta do servidor, aguarde…", "err");
       await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
       return api(url, opts, tentativa + 1);
     }
+    const tempo = e && e.name === "TimeoutError"
+      ? "A requisição passou de 90s sem resposta. Se o Render estiver frio, o primeiro acesso leva de 30 a 60s."
+      : "A conexão falhou antes de qualquer resposta. Causas comuns: token antigo no navegador, extensão bloqueando requisições, ou rede sem acesso ao Render.";
     throw new Error(
-      ABRINDO_DO_DISCO
-        ? "Não foi possível falar com a API. Abra o painel pelo endereço do Render em vez de abrir o arquivo do disco."
-        : "Não foi possível falar com a API (" + API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto."
+      "Não foi possível falar com a API (" + urlCheia + "). " + tempo
     );
   }
   if (r.status === 401) {
-    location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("admin")));
-    throw new Error("não autorizado");
+    // Token velho guardado no localStorage: o mais comum depois de trocar de
+    // conta. A sessao e limpa e o pessoa vai para o login, sem teimosia.
+    console.warn("[api] 401 em", API_BASE + url, "- limpando sessao e indo para o login");
+    Auth.sair();
+    throw new Error("Sessão expirada. Entrando novamente…");
   }
   if (!r.ok) {
     let msg = r.statusText;

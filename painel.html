@@ -153,18 +153,27 @@
       r = await fetch(Auth.API_BASE + url, {
         ...opts,
         headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
+        signal: AbortSignal.timeout(90_000),
       });
     } catch (e) {
+      console.error("[api] falhou em", Auth.API_BASE + url, "tentativa", tentativa + 1, "->", e);
       if (tentativa < 3) {
         const esperas = [5000, 15000, 35000];
         if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
-        if (tentativa === 1) toast("Render acordando do hibernamento, aguarde…", "err");
+        if (tentativa === 1) toast("Ainda sem resposta do servidor, aguarde…", "err");
         await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
         return api(url, opts, tentativa + 1);
       }
-      throw new Error("Não foi possível falar com a API (" + Auth.API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto.");
+      const tempo = e && e.name === "TimeoutError"
+        ? "A requisição passou de 90s sem resposta. Se o Render estiver frio, o primeiro acesso leva de 30 a 60s."
+        : "A conexão falhou antes de qualquer resposta. Causas comuns: token antigo no navegador, extensão bloqueando requisições, ou rede sem acesso ao Render.";
+      throw new Error("Não foi possível falar com a API (" + Auth.API_BASE + "). " + tempo);
     }
-    if (r.status === 401) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
+    if (r.status === 401) {
+      console.warn("[api] 401 em", Auth.API_BASE + url, "- limpando sessao e indo para o login");
+      Auth.sair();
+      throw new Error("Sessão expirada. Entrando novamente…");
+    }
     if (r.status === 403) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "Acesso negado."); }
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || "Erro " + r.status);
