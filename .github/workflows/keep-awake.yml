@@ -1,0 +1,33 @@
+name: keep-awake
+
+# O Render planeja "starter" hiberna o servico depois de ~15 min sem trafego
+# EXTERNO. O /health que o proprio app chama em si mesmo sai do mesmo
+# container e nao renova essa janela -- foi por isso que o heartbeat interno
+# (app/main.py::_heartbeat) nunca resolveu. Aqui o GET sai do GitHub, que o
+# Render conta como cliente de verdade.
+on:
+  schedule:
+    # A cada 10 min. O Render dorme em ~15, entamos com folga de 5.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pinga a API
+        env:
+          ALVO: https://chatbotproject-1-l9zr.onrender.com/health
+        run: |
+          for tentativa in 1 2 3; do
+            codigo=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$ALVO" || echo 000)
+            if [ "$codigo" = "200" ]; then
+              echo "ok: $ALVO respondeu 200 (tentativa $tentativa)"
+              exit 0
+            fi
+            echo "tentativa $tentativa: HTTP $codigo (o Render pode estar acordando)"
+            sleep 20
+          done
+          echo "::error::a API nao respondeu 200 em 3 tentativas"
+          exit 1
