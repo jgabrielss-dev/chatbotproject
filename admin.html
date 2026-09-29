@@ -142,11 +142,14 @@ const api = async (url, opts = {}, tentativa = 0) => {
     });
   } catch (e) {
     // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda está
-    // acordando do hibernamento do plano grátis. Uma retentativa resolve a
-    // esmagadora maioria dos casos.
-    if (tentativa < 2) {
+    // acordando do hibernamento do plano grátis. O cold start do plano grátis
+    // leva 30-60s, muito mais que os 3s de uma retentativa normal, então a
+    // primeira espera é longa de propósito.
+    if (tentativa < 3) {
+      const esperas = [5000, 15000, 35000];
       if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
-      await new Promise((r2) => setTimeout(r2, 3000));
+      if (tentativa === 1) toast("Render acordando do hibernamento, aguarde…", "err");
+      await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
       return api(url, opts, tentativa + 1);
     }
     throw new Error(

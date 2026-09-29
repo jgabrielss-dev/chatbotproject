@@ -145,11 +145,25 @@
     setTimeout(() => el.remove(), 4200);
   }
 
-  const api = async (url, opts = {}) => {
-    const r = await fetch(Auth.API_BASE + url, {
-      ...opts,
-      headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
-    });
+  // Mesma espera do admin.html: o cold start do Render no plano grátis leva
+  // 30-60s, entao 3s de espera nao adianta e o painel inteiro fica inutil.
+  const api = async (url, opts = {}, tentativa = 0) => {
+    let r;
+    try {
+      r = await fetch(Auth.API_BASE + url, {
+        ...opts,
+        headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
+      });
+    } catch (e) {
+      if (tentativa < 3) {
+        const esperas = [5000, 15000, 35000];
+        if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
+        if (tentativa === 1) toast("Render acordando do hibernamento, aguarde…", "err");
+        await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
+        return api(url, opts, tentativa + 1);
+      }
+      throw new Error("Não foi possível falar com a API (" + Auth.API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto.");
+    }
     if (r.status === 401) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
     if (r.status === 403) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "Acesso negado."); }
     const d = await r.json().catch(() => ({}));
