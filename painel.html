@@ -148,26 +148,33 @@
   // Mesma espera do admin.html: o cold start do Render no plano grátis leva
   // 30-60s, entao 3s de espera nao adianta e o painel inteiro fica inutil.
   const api = async (url, opts = {}, tentativa = 0) => {
+    // Headers fora do try: bug nosso de escopo precisa aparecer com a mensagem
+    // real, e nao como "servidor nao respondeu". Ver admin.html.
+    const cabecalhos = {
+      "Content-Type": "application/json",
+      ...Auth.cabecalhoAuth(),
+      ...(opts.headers || {}),
+    };
     let r;
     try {
-      r = await fetch(Auth.API_BASE + url, {
-        ...opts,
-        headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
-        signal: AbortSignal.timeout(90_000),
-      });
+      // Sem AbortSignal.timeout: um cold start lento nao pode virar erro.
+      r = await fetch(Auth.API_BASE + url, { ...opts, headers: cabecalhos });
     } catch (e) {
+      // TypeError = a request nem saiu. Qualquer outra coisa e bug nosso.
+      if (!e || e.name !== "TypeError") throw e;
       console.error("[api] falhou em", Auth.API_BASE + url, "tentativa", tentativa + 1, "->", e);
       if (tentativa < 3) {
         const esperas = [5000, 15000, 35000];
-        if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
-        if (tentativa === 1) toast("Ainda sem resposta do servidor, aguarde…", "err");
+        if (tentativa === 0) toast("Não foi possível alcançar a API, tentando de novo…", "err");
+        if (tentativa === 1) toast("Ainda sem conexão com a API, aguarde…", "err");
         await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
         return api(url, opts, tentativa + 1);
       }
-      const tempo = e && e.name === "TimeoutError"
-        ? "A requisição passou de 90s sem resposta. Se o Render estiver frio, o primeiro acesso leva de 30 a 60s."
-        : "A conexão falhou antes de qualquer resposta. Causas comuns: token antigo no navegador, extensão bloqueando requisições, ou rede sem acesso ao Render.";
-      throw new Error("Não foi possível falar com a API (" + Auth.API_BASE + "). " + tempo);
+      throw new Error(
+        "Não foi possível alcançar a API (" + Auth.API_BASE + url + "). A " +
+        "requisição nem saiu do navegador. Causas comuns: extensão bloqueando " +
+        "requisições, rede sem acesso ao Render, ou DNS bloqueado."
+      );
     }
     if (r.status === 401) {
       console.warn("[api] 401 em", Auth.API_BASE + url, "- sessao invalida, indo para o login");

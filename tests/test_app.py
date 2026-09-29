@@ -364,6 +364,64 @@ check("a tela de login diz quando o e-mail nao chegou por cota do SMTP",
 # raiz do dominio, fora do repo.
 check("o auth.js sabe quando esta em pagina estatica",
       "EM_PAGINA_ESTATICA" in auth_js and "github\\.io" in auth_js)
+
+# Tudo que o auth.js exporta vive dentro de um IIFE e so existe como
+# window.Auth.<nome>. Chamar sem o prefixo da ReferenceError, e o catch do
+# api() transformava isso em "servidor nao respondeu" — foi assim que um bug
+# de escopo passou tres commits e rodou em producao. O sintoma era um aviso
+# de rede, mas a causa era uma funcao fora do escopo.
+_exportados = set(re.findall(r"^\s{4}(\w+): \w+,?\s*$", auth_js, re.M))
+_publicos = ("cabecalhoAuth", "obterSessao", "destino", "pagina", "irParaLogin",
+             "sair", "config", "entrar", "cadastrar", "recuperar", "esc",
+             "mostrarGate", "esconderGate", "API_BASE", "API_RENDER",
+             "EM_PAGINA_ESTATICA", "ABRINDO_DO_DISCO")
+for _n in _publicos:
+    check(f"auth.js exporta {_n}", _n in _exportados, "o painel chamaria undefined")
+
+_chamadas = re.compile(r"\b(" + "|".join(_publicos) + r")\s*\(")
+for _nome_arquivo, _txt in (("admin.html", painel_admin), ("painel.html", painel_cli),
+                            ("login.html", login), ("index.html", home)):
+    # Um nome definido localmente nao e o mesmo problema: admin.html define a
+    # propria esc(), painel.html faz "const esc = Auth.esc" e login.html define
+    # destino(). O que quebra e a chamada que o auth.js cria e ninguem definiu.
+    _defines = set(re.findall(
+        r"(?:function|const|let|var)\s+(" + "|".join(_publicos) + r")\b", _txt))
+    for _m in _chamadas.finditer(_txt):
+        _nome = _m.group(1)
+        if _nome in _defines:
+            continue
+        # Com prefixo, o trecho antes do nome termina em ponto que NAO faz parte
+        # de reticencias: "Auth.cabecalhoAuth(". Sem prefixo, "...cabecalhoAuth("
+        # tem ponto antes, mas ele e o operador spread — por isso a checagem
+        # ignora "..." e so aceita o nome como solto.
+        _antes = _txt[:_m.start()].rstrip()
+        _com_prefixo = _antes.endswith(".") and not _antes.endswith("...")
+        check(f"{_nome_arquivo} chama Auth.{_nome}() com o prefixo",
+              _com_prefixo,
+              f"achou '{_nome}(' sem 'Auth.' — ReferenceError em producao")
+
+# O bug de cabecalhoAuth() sobe do try porque montavamos os headers DENTRO
+# dele: o ReferenceError era capturado, retentado 4x com 55s de espera e
+# reportado como "servidor nao respondeu". Dois testes para travar a correcao:
+# os headers tem de ser montados antes do try, e nada pode matar a request
+# por tempo -- quem pediu foi para nao marcar nada como concluido por timeout.
+for _nome_arquivo, _txt in (("admin.html", painel_admin), ("painel.html", painel_cli)):
+    _api = _txt[_txt.index("const api = async"):_txt.index("const api = async") + 2200]
+    _try = _api.index("try {")
+    _headers = _api.index("cabecalhos")
+    check(f"{_nome_arquivo} monta os headers ANTES do try",
+          _headers < _try,
+          "bug de escopo dentro do try vira 'servidor nao respondeu' de novo")
+    check(f"{_nome_arquivo} nao mata a requisicao por timeout",
+          "AbortSignal.timeout" not in _txt.replace(
+              "// Sem AbortSignal.timeout", "").replace(
+              "// Sem AbortSignal.timeout:", ""),
+          "timeout artificial transforma cold start lento em erro na tela")
+    check(f"{_nome_arquivo} so repete em falha de rede de verdade",
+          'e.name !== "TypeError"' in _api,
+          "sem isso, qualquer bug do JS entra no retry de rede")
+
+
 check("o auth.js decide entre /admin e /admin.html",
       'EM_PAGINA_ESTATICA ? "./" + nome + ".html" : "/" + nome' in auth_js,
       "o caminho do Pages precisa ser RELATIVO: '/admin.html' vira 404 porque "

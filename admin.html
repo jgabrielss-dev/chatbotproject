@@ -134,35 +134,39 @@ const API_BASE = /\.github\.io$/i.test(location.hostname) || ABRINDO_DO_DISCO ? 
 
 
 const api = async (url, opts = {}, tentativa = 0) => {
+  // Os headers sao montados ANTES do try de proposito. Dentro do try, um
+  // ReferenceError nosso (bug de escopo) era capturado e reportado como
+  // "servidor nao respondeu", com 4 tentativas e 55s de espera, e a causa
+  // real sumia da tela. Fora do try ele sobe com a mensagem verdadeira.
+  const cabecalhos = {
+    "Content-Type": "application/json",
+    ...Auth.cabecalhoAuth(),
+    ...(opts.headers || {}),
+  };
   let r;
   try {
-    r = await fetch(API_BASE + url, {
-      ...opts,
-      headers: { "Content-Type": "application/json", ...cabecalhoAuth(), ...(opts.headers || {}) },
-      // Sem timeout o "Failed to fetch" fica indefinido: pode ser o Render
-      // frio, mas tb pode ser token velho, extensao ou proxy. O motivo real
-      // vai na tela e no console, em vez de a gente adivinhar "hibernacao".
-      signal: AbortSignal.timeout(90_000),
-    });
+    // Sem AbortSignal.timeout: nada aqui marca a requisicao como falha por
+    // tempo. Se o Render estiver frio, a resposta chega quando chega. Cortar
+    // em 90s era o que transformava um cold start lento em erro na tela.
+    r = await fetch(API_BASE + url, { ...opts, headers: cabecalhos });
   } catch (e) {
-    // "Failed to fetch" e o timeout sao genericos: o Render frio e uma causa
-    // possivel, mas nao a unica (token velho, extensao, proxy, DNS). Nao da
-    // para distinguir daqui, entao mostramos o motivo real em vez de cravar
-    // "hibernacao" -- o diagnostico errado atrasou a correcao.
+    // O fetch so lanca TypeError quando a request nem saiu (DNS, CORS, proxy,
+    // extensao, offline) e AbortError quando alguem cancelou. Qualquer outra
+    // excecao aqui e bug nosso: propagamos em vez de culpar a rede.
+    if (!e || e.name !== "TypeError") throw e;
     const urlCheia = API_BASE + url;
     console.error("[api] falhou em", urlCheia, "tentativa", tentativa + 1, "->", e);
     if (tentativa < 3) {
       const esperas = [5000, 15000, 35000];
-      if (tentativa === 0) toast("Servidor não respondeu, tentando de novo…", "err");
-      if (tentativa === 1) toast("Ainda sem resposta do servidor, aguarde…", "err");
+      if (tentativa === 0) toast("Não foi possível alcançar a API, tentando de novo…", "err");
+      if (tentativa === 1) toast("Ainda sem conexão com a API, aguarde…", "err");
       await new Promise((r2) => setTimeout(r2, esperas[tentativa]));
       return api(url, opts, tentativa + 1);
     }
-    const tempo = e && e.name === "TimeoutError"
-      ? "A requisição passou de 90s sem resposta. Se o Render estiver frio, o primeiro acesso leva de 30 a 60s."
-      : "A conexão falhou antes de qualquer resposta. Causas comuns: token antigo no navegador, extensão bloqueando requisições, ou rede sem acesso ao Render.";
     throw new Error(
-      "Não foi possível falar com a API (" + urlCheia + "). " + tempo
+      "Não foi possível alcançar a API (" + urlCheia + "). A requisição nem " +
+      "saiu do navegador. Causas comuns: extensão bloqueando requisições, " +
+      "rede sem acesso ao Render, ou DNS bloqueado."
     );
   }
   if (r.status === 401) {
