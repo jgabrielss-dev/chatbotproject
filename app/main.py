@@ -201,6 +201,7 @@ _poller_task: asyncio.Task | None = None
 _keepalive_task: asyncio.Task | None = None
 _worker_caixa_task: asyncio.Task | None = None
 _sync_task: asyncio.Task | None = None
+_heartbeat_task: asyncio.Task | None = None
 
 
 def _gerar_secret() -> str:
@@ -512,6 +513,49 @@ async def _worker_caixa() -> None:
         await asyncio.sleep(2)
 
 
+async def _heartbeat() -> None:
+    """Mantém o serviço Render acordado dando GET em /health no próprio app.
+
+    O Render conta a hibernação por ~15 min sem tráfego HTTP. Sem isto, a
+    primeira visita do dia volta para uma tela de "servidor não respondendo" de
+    30 a 90 segundos — e nenhuma página resolve isso, porque o browser trava
+    antes de o HTML chegar.
+
+    Requisitos que moldaram o código:
+    - Precisa de BASE_URL para saber o próprio endereço. Sem ele não dá para
+      pinger a si mesmo, e a tarefa desliga em vez de logar erro a cada 10 min.
+    - O erro de rede é engolido e a tarefa segue: um GET que falha é exatamente
+      o caso "o Render já dormiu", e é justamente quando não devemos desistir.
+    - Não usa o /health local (chamar a si mesmo por shortcut não gera tráfego
+      de rede e o Render não conta).
+    """
+    import httpx
+
+    if not settings.base_url:
+        log.info("Heartbeat DESLIGADO: defina BASE_URL para o app saber o proprio endereco.")
+        return
+
+    intervalo = max(float(settings.heartbeat_seg), 120.0)
+    alvo = f"{settings.base_url}/health"
+    if settings.heartbeat_seg <= 0:
+        log.info("Heartbeat DESLIGADO (HEARTBEAT_SEG=0).")
+        return
+
+    log.info("Heartbeat LIGADO: GET %s a cada %.0fs (o Render hiberna ~900s).",
+             alvo, intervalo)
+    async with httpx.AsyncClient(timeout=20) as http:
+        while True:
+            try:
+                r = await http.get(alvo)
+                if r.status_code != 200:
+                    log.warning("Heartbeat respondeu HTTP %s", r.status_code)
+            except Exception as e:
+                # Silencioso de propósito: se o Render dormiu, o próximo ciclo
+                # tenta de novo e é o próprio Render que acorda o processo.
+                log.debug("Heartbeat falhou (provavel hibernacao): %s", e)
+            await asyncio.sleep(intervalo)
+
+
 async def _reconciliar_tarefas_de_fundo() -> None:
     """Liga/desliga as tarefas de fundo conforme os canais ativos no banco.
     Sem isso, um canal Instagram/Evolution criado pelo painel só começaria a
@@ -619,9 +663,12 @@ async def _reconciliar_webhook_telegram(canal: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _worker_caixa_task, _heartbeat_task
+    # O heartbeat nao depende do banco: e o que impede o Render de hibernar, e
+    # o banco some de qualquer jeito se o servico ficar tempo de pe sem uso.
+    _heartbeat_task = asyncio.create_task(_heartbeat())
     if settings.has_db:
         await get_pool()
-        global _worker_caixa_task
         _worker_caixa_task = asyncio.create_task(_worker_caixa())
         # Só há tarefa de fundo nos canais NÃO OFICIAIS. Os oficiais são
         # 100% push (webhook), então nada de polling/keepalive: é isso que
@@ -632,12 +679,14 @@ async def lifespan(app: FastAPI):
             log.warning("Falha ao reconciliar webhooks da Evolution: %s", e)
         await _reconciliar_tarefas_de_fundo()
     yield
-    for tarefa in (_poller_task, _keepalive_task, _worker_caixa_task, _sync_task):
+    for tarefa in (_poller_task, _keepalive_task, _worker_caixa_task,
+                   _sync_task, _heartbeat_task):
         if tarefa:
             tarefa.cancel()
     # Cancelar não basta: sem await a task fica órfã e o Uvicorn mata o
     # processo no meio de uma escrita no banco.
-    pendentes = [t for t in (_poller_task, _keepalive_task, _worker_caixa_task, _sync_task) if t]
+    pendentes = [t for t in (_poller_task, _keepalive_task, _worker_caixa_task,
+                              _sync_task, _heartbeat_task) if t]
     if pendentes:
         await asyncio.gather(*pendentes, return_exceptions=True)
     await close_pool()

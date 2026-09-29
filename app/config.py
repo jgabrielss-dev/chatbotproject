@@ -29,6 +29,31 @@ class Settings:
     evolution_keepalive_seg: float = float(os.getenv("EVOLUTION_KEEPALIVE_SEG", "1800"))
 
     # ------------------------------------------------------------------
+    # Heartbeat: mantém o serviço Render acordado 24h
+    # ------------------------------------------------------------------
+    # O Render hiberna o serviço depois de ~15 min sem tráfego. Isso não
+    # custava dinheiro, mas custava a UX: quem abria a site pela primeira vez
+    # ficava 30-90s olhando "servidor não respondendo", porque o browser trava
+    # ANTES de qualquer HTML chegar — não há JavaScript da página que resolva
+    # esse caso.
+    #
+    # Este heartbeat faz o app dar GET em /health no próprio BASE_URL. É tráfego
+    # HTTP de verdade para o Render, então conta como atividade.
+    #
+    # Custo: 24h por dia = 744h/mês, dentro das 750h do plano grátis. Um único
+    # serviço 24h NÃO estoura a cota; dois estoura (1488h). O comentário antigo
+    # em EVOLUTION_KEEPALIVE_SEG falava em 720h como se fosse o mês inteiro e
+    # tratava 24h como proibido, mas a conta fecha: 744 < 750.
+    #
+    # IMPORTANTE: isto roda dentro do processo, então só funciona com o serviço
+    # acordado. Ele não é o que acorda um serviço adormecido — é o que impede
+    # que ele durma depois do primeiro acesso. O wake de verdade para um serviço
+    # parado (deploy, crash) é o próprio Render, que sempre restartou.
+    #
+    # 0 = desliga. Abaixo de 120s é desperdício, então o piso é 120s.
+    heartbeat_seg: float = float(os.getenv("HEARTBEAT_SEG", "600"))
+
+    # ------------------------------------------------------------------
     # Supabase Auth (contas de usuário)
     # ------------------------------------------------------------------
     # A URL e a chave *publicável* do projeto. A publicável vai no navegador de

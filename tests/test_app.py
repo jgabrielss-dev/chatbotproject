@@ -1,4 +1,4 @@
-﻿"""Testes dos canais: validacao de credenciais, redaction e tarefas de fundo.
+"""Testes dos canais: validacao de credenciais, redaction e tarefas de fundo.
 
 Roda sem banco e sem rede:
 
@@ -461,6 +461,7 @@ check("_canal_dono consulta com o dono", "obter_canal_do_dono" in fonte
 # Os /webhook/... ficam de fora de proposito: sao publicos e se autenticam pelo
 # segredo do canal na propria rota.
 src_main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+src_config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
 # Split so em "@app." no inicio de linha: cortando tambem em "async def" o
 # chunk da rota ficaria apenas com a linha do decorator, sem o corpo.
 partes = re.split(r"\n(?=@app\.)", src_main)
@@ -524,6 +525,68 @@ check("o painel do cliente nao expoe canais nao-oficiais a nao-admin",
       "CANAIS_NAO_OFICIAIS_PARA_USUARIOS" in (ROOT / "app" / "config.py").read_text(encoding="utf-8"))
 check("a restricao de canal nao oficial existe no servidor",
       "_exigir_tipo_permitido" in src_main)
+
+# --------------------------------------------------------------------------
+print("\n== heartbeat mantem o Render acordado ==")
+
+from app import main as _m
+from app.config import Settings
+
+check("o heartbeat e ligado no lifespan e cancelado no shutdown",
+      "_heartbeat_task = asyncio.create_task(_heartbeat())" in src_main
+      and src_main.count("_heartbeat_task") >= 3)
+check("o heartbeat tem intervalo proprio, separado do keepalive Evolution",
+      "heartbeat_seg" in src_config and "HEARTBEAT_SEG" in src_config)
+check("o intervalo padrao fica abaixo da janela de hibernacao do Render",
+      float(Settings(heartbeat_seg=0).heartbeat_seg) == 0.0
+      and 0 < float(re.search(r'HEARTBEAT_SEG", "([\d.]+)"', src_config).group(1)) < 900,
+      "o padrao precisa ser menor que 900s senao o Render dorme entre os pings")
+
+# Prova de que o ping sai para a rede: conta as requisicoes de verdade.
+# O _heartbeat le settings.base_url direto do modulo, e Settings e um
+# dataclass frozen, entao nao da para trocar o atributo no objeto global —
+# troca-se o modulo inteiro por um stub so durante o teste.
+async def _conta_pings():
+    chamadas = []
+
+    class _FalsoClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            chamadas.append(url)
+            return type("R", (), {"status_code": 200})()
+
+    import types as _types
+    import httpx as _httpx
+    real_client = _httpx.AsyncClient
+    real_modulo = _m.settings
+    _httpx.AsyncClient = _FalsoClient
+    _m.settings = _types.SimpleNamespace(
+        base_url="https://exemplo.test", heartbeat_seg=600.0)
+    try:
+        tarefa = asyncio.create_task(_m._heartbeat())
+        await asyncio.sleep(0.05)
+        tarefa.cancel()
+        try:
+            await tarefa
+        except BaseException:
+            pass
+    finally:
+        _m.settings = real_modulo
+        _httpx.AsyncClient = real_client
+    return chamadas
+
+pings = asyncio.run(_conta_pings())
+check("o heartbeat faz GET em <BASE_URL>/health para fora do processo",
+      bool(pings) and pings[0] == "https://exemplo.test/health",
+      f"visto: {pings[:1]}")
 
 # --------------------------------------------------------------------------
 print("\n== resumo ==")
