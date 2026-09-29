@@ -48,7 +48,7 @@ async function carregarContas() {
     return;
   }
   $("contasLista").innerHTML = contasCache.map((c) => `
-    <div class="row" style="justify-content:space-between;border-top:1px solid var(--borda);padding:10px 0">
+    <div class="row" style="justify-content:space-between;border-top:1px solid var(--border);padding:10px 0">
       <div>
         <strong>${esc(c.email || c.id)}</strong>
         <div class="muted">

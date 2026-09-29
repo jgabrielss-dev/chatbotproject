@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chatbot Project Â· Atendimento com IA no Telegram, WhatsApp e Instagram</title>
+<meta name="description" content="Crie chatbots que atendem seus clientes no Telegram, WhatsApp e Instagram. Um menu por conta, conversas e a memoria de cada cliente.">
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* A home Ã© uma pÃ¡gina de venda, nÃ£o o painel: o style.css do painel Ã© grid com
+     sidebar, entÃ£o aqui neutralizo o grid e uso coluna central. */
+  body.venda { display: block; background: var(--bg); }
+  .venda-wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 72px; }
+
+  .topo { display: flex; align-items: center; justify-content: space-between;
+          gap: 16px; padding: 8px 0 30px; }
+  .marca { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
+  .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--accent);
+          color: #fff; display: grid; place-items: center; font-size: 15px; }
+
+  .hero h1 { font-size: 38px; line-height: 1.15; margin: 0 0 14px; letter-spacing: -.02em; }
+  .hero p.lead { font-size: 17px; color: var(--muted); margin: 0 0 26px; max-width: 620px; }
+  .hero .cta { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .hero .btn { width: auto; padding: 11px 20px; font-size: 15px; }
+  .hero .nota { font-size: 13px; color: var(--muted); margin-top: 14px; }
+
+  .grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+           gap: 14px; margin: 46px 0 0; }
+  .recurso { background: var(--panel); border: 1px solid var(--border);
+             border-radius: 10px; padding: 18px; }
+  .recurso h3 { margin: 0 0 7px; font-size: 15px; }
+  .recurso p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.5; }
+  .recurso .icone { font-size: 20px; margin-bottom: 10px; }
+
+  .como { margin: 52px 0 0; border-top: 1px solid var(--border); padding-top: 30px; }
+  .como h2 { font-size: 20px; margin: 0 0 18px; }
+  .passos { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 20px; }
+  .passo .n { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+              background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; margin-bottom: 9px; }
+  .passo h3 { margin: 0 0 5px; font-size: 14px; }
+  .passo p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+  .rodape { margin: 56px 0 0; padding-top: 22px; border-top: 1px solid var(--border);
+            display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+            font-size: 13px; color: var(--muted); }
+  .rodape a { color: var(--muted); text-decoration: none; }
+  .rodape a:hover { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 30px; }
+    .hero .cta .btn { width: 100%; }
+  }
+</style>
+</head>
+<body class="venda">
+
+<div class="venda-wrap">
+
+  <header class="topo">
+    <div class="marca"><span class="logo">C</span> Chatbot Project</div>
+    <a class="btn" href="/login">Entrar</a>
+  </header>
+
+  <section class="hero">
+    <h1>Seu bot atende. VocÃª acompanha tudo.</h1>
+    <p class="lead">
+      Um chatbot que responde no Telegram, WhatsApp e Instagram, com as conversas
+      salvas e a memÃ³ria do que ele aprendeu de cada cliente. Cada conta tem o seu
+      painel, separado do dos outros.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="/login">Criar conta grÃ¡tis</a>
+      <a class="btn" href="/login">JÃ¡ tenho conta</a>
+    </div>
+    <p class="nota">Criar a conta leva menos de um minuto. VocÃª confirma o e-mail e entra.</p>
+  </section>
+
+  <section class="grade">
+    <div class="recurso">
+      <div class="icone">ðŸ’¬</div>
+      <h3>Um menu sÃ³ seu</h3>
+      <p>Agentes, canais e conversas ficam na sua conta. NinguÃ©m mais vÃª o que Ã© seu.</p>
+    </div>
+    <div class="recurso">
+      <div class="icone">ðŸ§ </div>
+      <h3>MemÃ³ria do cliente</h3>
+      <p>O bot extrai o que aprendeu de cada pessoa e usa na conversa seguinte.</p>
+    </div>
+    <div class="recurso">
+      <div class="icone">ðŸ“¡</div>
+      <h3>Todos os canais</h3>
+      <p>Telegram, WhatsApp, Instagram e webhook, com fila que nÃ£o perde mensagem.</p>
+    </div>
+  </section>
+
+  <section class="como">
+    <h2>Como funciona</h2>
+    <div class="passos">
+      <div class="passo">
+        <div class="n">1</div>
+        <h3>Crie sua conta</h3>
+        <p>Com o seu e-mail. A confirmaÃ§Ã£o chega na hora.</p>
+      </div>
+      <div class="passo">
+        <div class="n">2</div>
+        <h3>Crie um agente</h3>
+        <p>VocÃª escolhe a personalidade e o que ele deve fazer.</p>
+      </div>
+      <div class="passo">
+        <div class="n">3</div>
+        <h3>Conecte um canal</h3>
+        <p>Escaneia o QR do WhatsApp ou liga o Telegram. O bot comeÃ§a a responder.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="rodape">
+    <span>Chatbot Project</span>
+    <span><a href="/login">Entrar</a> Â· <a href="/login">Criar conta</a></span>
+  </footer>
+
+</div>
+
+<script src="/static/auth.js"></script>
+<script>
+  // Quem jÃ¡ tem sessÃ£o nÃ£o deveria ver a pÃ¡gina de venda: vai direto para o
+  // painel que o papel permite. Sem sessÃ£o, fica aqui â€” Ã© sÃ³ um GET em
+  // /api/eu, e a home Ã© pÃºblica justamente para nÃ£o exigir login.
+  Auth.obterSessao().then(function (eu) {
+    if (eu) location.replace(eu.eh_admin ? "/admin" : "/painel");
+  }).catch(function () {
+    // Falhou em validar a sessÃ£o (servidor acordando, rede): fica na home.
+  });
+</script>
+</body>
+</html>

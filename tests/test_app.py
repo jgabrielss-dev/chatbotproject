@@ -236,13 +236,16 @@ check("formulario do Instagram so tem o campo sessionid",
       bloco.strip()[:80])
 
 # --------------------------------------------------------------------------
-print("\n== as tres telas existem e nao confiam no ADMIN_TOKEN ==")
+print("\n== as quatro telas existem e nao confiam no ADMIN_TOKEN ==")
 painel_admin = (ROOT / "app" / "static" / "admin.html").read_text(encoding="utf-8")
-home = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+home = (ROOT / "app" / "static" / "home.html").read_text(encoding="utf-8")
+login = (ROOT / "app" / "static" / "login.html").read_text(encoding="utf-8")
 painel_cli = (ROOT / "app" / "static" / "painel.html").read_text(encoding="utf-8")
 auth_js = (ROOT / "app" / "static" / "auth.js").read_text(encoding="utf-8")
+style_css = (ROOT / "app" / "static" / "style.css").read_text(encoding="utf-8")
 
-for nome, texto in (("admin", painel_admin), ("index", home), ("painel", painel_cli)):
+for nome, texto in (("admin", painel_admin), ("home", home),
+                    ("login", login), ("painel", painel_cli)):
     check(f"{nome}.html existe e nao esta vazio", len(texto) > 500)
     check(f"{nome}.html usa o auth.js", '/static/auth.js' in texto)
     check(f"{nome}.html nao manda mais X-Admin-Token", "X-Admin-Token" not in texto)
@@ -251,10 +254,30 @@ check("o painel admin exige sessao de admin antes de carregar",
       "await Auth.obterSessao()" in painel_admin and "if (!eu.eh_admin)" in painel_admin)
 check("o painel do cliente manda o admin para /admin",
       "eu.eh_admin" in painel_cli and '"/admin"' in painel_cli)
-check("a home tem login, cadastro e recuperacao de senha",
-      'data-modo="recuperar"' in home and "Auth.cadastrar" in home and "Auth.entrar" in home)
+check("a home e de venda, sem formulario de login",
+      'id="form"' not in home and "Auth.entrar" not in home and "Auth.cadastrar" not in home)
+check("a home manda entrar e criar conta para /login",
+      home.count('href="/login"') >= 2 and 'href="/painel"' not in home)
 check("a home manda admin para /admin e cliente para /painel",
       'eu.eh_admin ? "/admin" : "/painel"' in home)
+check("a home nao quebra se /api/eu falhar (Render acordando)",
+      ".catch(" in home)
+check("a tela de login tem login, cadastro e recuperacao de senha",
+      'data-modo="recuperar"' in login and "Auth.cadastrar" in login
+      and "Auth.entrar" in login)
+check("a tela de login manda admin para /admin e cliente para /painel",
+      'eu.eh_admin ? "/admin" : "/painel"' in login)
+
+# Nenhuma pagina pode usar uma variavel de cor que o style.css nao define:
+# quando isso acontece o `var(--x)` cai para vazio e a tela fica sem cor, sem
+# erro no console e sem o build reclamar. Aconteceu com --prim/--txt2/--borda.
+definidas = set(re.findall(r"(--[a-z0-9-]+)\s*:", style_css))
+for nome, texto in (("admin", painel_admin), ("home", home),
+                    ("login", login), ("painel", painel_cli)):
+    usadas = set(re.findall(r"var\((--[a-z0-9-]+)\)", texto))
+    check(f"{nome}.html nao usa variavel de cor inexistente",
+          usadas <= definidas,
+          f"inexistentes: {sorted(usadas - definidas)}")
 check("o painel admin tem a tela de contas", 'id="contasCard"' in painel_admin
       and "/api/admin/contas" in painel_admin)
 check("o painel do cliente usa as rotas escopadas em /api/painel",
@@ -312,9 +335,20 @@ if tem_testclient:
 
     # As paginas sao publicas: e o shell do HTML, nenhum dado sai delas.
     c = _com_auth()
-    for rota in ("/", "/admin", "/painel", "/api/config", "/health"):
+    for rota in ("/", "/login", "/admin", "/painel", "/api/config", "/health"):
         r = c.get(rota)
         check(f"{rota} e publica", r.status_code == 200, f"HTTP {r.status_code}")
+
+    # "/" e a home de venda e "/login" e o formulario: a confusao entre os dois
+    # trocaria o login por texto de venda, ou o contrario.
+    c = _com_auth()
+    r = c.get("/")
+    check("/ entrega a home de venda, nao o formulario",
+          'href="/login"' in r.text and 'id="form"' not in r.text)
+    c = _com_auth()
+    r = c.get("/login")
+    check("/login entrega o formulario, nao a home",
+          'id="form"' in r.text and 'href="/login"' not in r.text)
 
     c = _com_auth()
     r = c.get("/api/config")

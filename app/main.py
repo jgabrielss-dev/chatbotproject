@@ -37,7 +37,8 @@ ADMIN_EMERGENCIA_ID = ADMIN_EMERGENCIA.id
 
 RAIZ = Path(__file__).resolve().parent.parent
 ESTATICO = RAIZ / "app" / "static"
-INDEX_HTML = ESTATICO / "index.html"
+HOME_HTML = ESTATICO / "home.html"
+LOGIN_HTML = ESTATICO / "login.html"
 ADMIN_HTML = ESTATICO / "admin.html"
 PAINEL_HTML = ESTATICO / "painel.html"
 MAX_CANAIS_POR_AGENTE = 5
@@ -665,10 +666,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rotas publicas: as tres paginas (sao so o shell do HTML; os dados exigem
-# conta), o health check do Render, a config do front e os webhooks, que tem
-# segredo proprio na propria rota. TODO o resto exige usuario logado.
-_ROTAS_PUBLICAS = ("/", "/health", "/admin", "/painel", "/api/config")
+# Rotas publicas: a home de venda, o login, as telas de painel (sao so o shell
+# do HTML; os dados exigem conta), o health check do Render, a config do front e
+# os webhooks, que tem segredo proprio na propria rota. TODO o resto exige
+# usuario logado.
+_ROTAS_PUBLICAS = ("/", "/login", "/health", "/admin", "/painel", "/api/config")
 _PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
 
 
@@ -718,9 +720,17 @@ async def exigir_login(request: Request, call_next):
 
 @app.get("/", include_in_schema=False)
 async def index():
-    """Home: login e cadastro. A escolha admin x cliente acontece depois, no
-    navegador, conforme o papel que o servidor devolve em /api/config."""
-    return FileResponse(INDEX_HTML)
+    """Home de venda, pública e sem login. Quem já tem sessão é redirecionado
+    para o painel pelo JS da própria página."""
+    return FileResponse(HOME_HTML)
+
+
+@app.get("/login", include_in_schema=False)
+async def pagina_login():
+    """Entrar, criar conta e recuperar senha. A escolha admin x cliente
+    acontece depois, no navegador, conforme o papel que o servidor devolve
+    em /api/eu."""
+    return FileResponse(LOGIN_HTML)
 
 
 @app.get("/admin", include_in_schema=False)
