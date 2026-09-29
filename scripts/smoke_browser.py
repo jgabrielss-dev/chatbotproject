@@ -14,7 +14,12 @@ import time
 
 PROMPT = pathlib.Path(__file__).resolve().parent.parent.parent / "prompt.txt"
 BASE = "https://chatbotproject-1-l9zr.onrender.com"
-ORIGEM = BASE
+PAGES = "https://jgabrielss-dev.github.io/chatbotproject/"
+
+# O navegador agora abre o site no GITHUB PAGES e fala com a API no Render. Sao
+# origens diferentes, entao o CORS que importa e o do Pages, nao o do Render.
+# Testar com Origin do Render dava 200 sem provar nada do caminho real.
+ORIGEM = PAGES
 
 
 def _cred(chave: str) -> str:
@@ -83,12 +88,20 @@ def main() -> None:
         sys.exit(1)
     print(f"   {eu.json()}")
 
-    print("4) o que o browser mostra ao abrir / sem sessao")
-    t0 = time.time()
-    raiz = httpx.get(f"{BASE}/", timeout=180)
-    print(f"   GET / -> {raiz.status_code} em {time.time() - t0:.1f}s, {len(raiz.text)} bytes")
-    for marcador in ("id=\"login\"", "id=\"cadastro\"", "auth.js", "id=\"gate\""):
-        print(f"     contem {marcador!r}: {marcador in raiz.text}")
+    print(f"4) o que o browser ve no GITHUB PAGES ({PAGES})")
+    site = httpx.Client(timeout=180)
+    for caminho, marcador in (("", 'href="login.html"'),
+                              ("login.html", 'id="form"'),
+                              ("admin.html", 'src="auth.js"')):
+        t0 = time.time()
+        r = site.get(PAGES + caminho)
+        print(f"   GET {caminho or '/'} -> {r.status_code} em {time.time() - t0:.1f}s, "
+              f"{len(r.text)} bytes | contem {marcador!r}: {marcador in r.text}")
+    # Os assets tem de ser servidos pelo Pages. Se vierem do Render, o site
+    # so funciona por causa de uma segunda fonte de verdade.
+    for asset in ("auth.js", "style.css"):
+        r = site.get(PAGES + asset)
+        print(f"   GET {asset} -> {r.status_code} ({len(r.content)} bytes)")
 
     print("\nFLUXO DO NAVEGADOR OK")
 

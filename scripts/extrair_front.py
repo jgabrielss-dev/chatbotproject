@@ -1,15 +1,19 @@
-"""Gera app/static/{style.css,admin.html} a partir do painel antigo da raiz.
+"""GERADOR DE UM TEMPO. Nao roda mais; foi arquivado para nao ser confundido com
+uma tarefa util.
 
-O painel tem ~870 linhas de HTML/JS escritas a mao e funcionais. Reescrever do
-zero perderia detalhe de UI que leva meses; o que muda e so a autenticacao
-(de ADMIN_TOKEN para sessao Supabase). Entao este script:
+Ele produzia {style.css,admin.html} a partir do painel antigo da raiz, trocando
+o gate de ADMIN_TOKEN por sessao Supabase. Foi rodado uma unica vez, em
+setembro de 2025, e o resultado ja esta commitado e revisado a mao desde entao.
 
-  1. extrai o <style> para style.css;
-  2. troca o <style> por um <link> e aponta o <script> para auth.js;
-  3. substitui o gate de ADMIN_TOKEN por um bootstrap de sessao;
-  4. troca o header X-Admin-Token por Authorization: Bearer.
+CUIDADO: rodar este script hoje DESTRUI o admin.html. Ele le a origem e
+sobrescreve o destino sem condicao, e a origem (painel-antigo.html) nao esta
+mais no repo, entao o script falha e deixa os arquivos como estavam. Pior: se
+alguem restaurar a origem, o gerador devolveria o admin.html para a versao de
+dezembro, com o gate de token em vez do login, e com `href="/static/style.css"`
+— caminho que da 404 no GitHub Pages.
 
-Roda uma vez. Idempotente: sempre le da raiz e sempre sobrescreve o destino.
+Mantido so como registro de como a migracao foi feita. As edicoes no
+admin.html vao no arquivo.
 """
 from __future__ import annotations
 
@@ -18,8 +22,8 @@ import re
 import sys
 
 RAIZ = pathlib.Path(__file__).resolve().parent.parent
-ORIGEM = RAIZ / "index.html"
-DESTINO = RAIZ / "app" / "static"
+ORIGEM = RAIZ / "painel-antigo.html"
+DESTINO = RAIZ
 
 # Script do painel de contas. Injetado antes do script principal.
 CODIGO_CONTAS = """

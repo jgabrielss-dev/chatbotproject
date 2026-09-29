@@ -216,10 +216,11 @@ asyncio.run(_tarefas())
 
 # --------------------------------------------------------------------------
 print("\n== painel: o form de Instagram nao pede mais usuario/senha ==")
-# Aponta para app/static/admin.html, que e o que o servidor serve em /admin.
-# O index.html da raiz virou a home de login e nao tem mais formulario de canal;
-# testar contra ele dava a impressao de cobertura onde nao ha nenhuma.
-html = (ROOT / "app" / "static" / "admin.html").read_text(encoding="utf-8")
+# Aponta para o admin.html da raiz, que e o que o servidor serve em /admin e o
+# que o GitHub Pages publica. O index.html da raiz virou a home de venda e nao
+# tem mais formulario de canal; testar contra ele dava a impressao de cobertura
+# onde nao ha nenhuma.
+html = (ROOT / "admin.html").read_text(encoding="utf-8")
 # O login por senha foi desativado pelo Instagram. Se sobrar referencia a
 # usuario/senha na validacao do botao "Criar canal", o usuario fica preso
 # preenchendo um campo que nem existe mais na tela.
@@ -236,37 +237,76 @@ check("formulario do Instagram so tem o campo sessionid",
       bloco.strip()[:80])
 
 # --------------------------------------------------------------------------
+src_main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+src_config = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+
 print("\n== as quatro telas existem e nao confiam no ADMIN_TOKEN ==")
-painel_admin = (ROOT / "app" / "static" / "admin.html").read_text(encoding="utf-8")
-home = (ROOT / "app" / "static" / "home.html").read_text(encoding="utf-8")
-login = (ROOT / "app" / "static" / "login.html").read_text(encoding="utf-8")
-painel_cli = (ROOT / "app" / "static" / "painel.html").read_text(encoding="utf-8")
-auth_js = (ROOT / "app" / "static" / "auth.js").read_text(encoding="utf-8")
-style_css = (ROOT / "app" / "static" / "style.css").read_text(encoding="utf-8")
+# As telas moram na RAIZ do repo: o GitHub Pages publica um site de projeto em
+# ".../<repo>/", que so encontra o que esta na raiz. Copia em app/static/ foi o
+# que deixou o Pages servindo o painel antigo.
+painel_admin = (ROOT / "admin.html").read_text(encoding="utf-8")
+home = (ROOT / "index.html").read_text(encoding="utf-8")
+login = (ROOT / "login.html").read_text(encoding="utf-8")
+painel_cli = (ROOT / "painel.html").read_text(encoding="utf-8")
+auth_js = (ROOT / "auth.js").read_text(encoding="utf-8")
+style_css = (ROOT / "style.css").read_text(encoding="utf-8")
+
+check("as telas estao na raiz do repo, e nao em app/static/",
+      not (ROOT / "app" / "static").exists(),
+      "app/static/ voltou a existir: o Pages passaria a servir uma copia velha")
+check("a home e index.html, senao o Pages nao tem indice de diretorio",
+      (ROOT / "index.html").exists() and not (ROOT / "home.html").exists())
+check("o build le os arquivos da raiz",
+      'RAIZ / "index.html"' in src_main and 'RAIZ / "auth.js"' in src_main)
 
 for nome, texto in (("admin", painel_admin), ("home", home),
                     ("login", login), ("painel", painel_cli)):
     check(f"{nome}.html existe e nao esta vazio", len(texto) > 500)
-    check(f"{nome}.html usa o auth.js", '/static/auth.js' in texto)
+    check(f"{nome}.html usa o auth.js", 'src="auth.js"' in texto)
     check(f"{nome}.html nao manda mais X-Admin-Token", "X-Admin-Token" not in texto)
 
 check("o painel admin exige sessao de admin antes de carregar",
       "await Auth.obterSessao()" in painel_admin and "if (!eu.eh_admin)" in painel_admin)
-check("o painel do cliente manda o admin para /admin",
-      "eu.eh_admin" in painel_cli and '"/admin"' in painel_cli)
+check("o painel do cliente manda o admin para a tela de admin",
+      "eu.eh_admin" in painel_cli and "Auth.pagina(\"admin\")" in painel_cli)
 check("a home e de venda, sem formulario de login",
       'id="form"' not in home and "Auth.entrar" not in home and "Auth.cadastrar" not in home)
-check("a home manda entrar e criar conta para /login",
-      home.count('href="/login"') >= 2 and 'href="/painel"' not in home)
-check("a home manda admin para /admin e cliente para /painel",
-      'eu.eh_admin ? "/admin" : "/painel"' in home)
+# "login.html" e nao "/login": no GitHub Pages nao ha servidor, entao /login vira
+# um pedido do arquivo "login" e da 404.
+check("a home manda entrar e criar conta para login.html",
+      home.count('href="login.html"') >= 2 and 'href="/login"' not in home
+      and 'href="/painel"' not in home)
+check("a home manda o usuario para a tela certa via Auth.destino",
+      "Auth.destino(eu)" in home)
 check("a home nao quebra se /api/eu falhar (Render acordando)",
       ".catch(" in home)
 check("a tela de login tem login, cadastro e recuperacao de senha",
       'data-modo="recuperar"' in login and "Auth.cadastrar" in login
       and "Auth.entrar" in login)
-check("a tela de login manda admin para /admin e cliente para /painel",
-      'eu.eh_admin ? "/admin" : "/painel"' in login)
+check("a tela de login usa Auth.destino, que sabe a diferenca entre os hosts",
+      "Auth.destino(eu)" in login and "Auth.destino(eu, alvo)" in login)
+
+# O GitHub Pages nao tem servidor: "/admin" la vira um pedido de arquivo
+# chamado admin e devolve 404. O caminho tambem tem de ser RELATIVO, porque o
+# Pages serve o site de projeto em ".../<repo>/" e "/auth.js" apontaria para a
+# raiz do dominio, fora do repo.
+check("o auth.js sabe quando esta em pagina estatica",
+      "EM_PAGINA_ESTATICA" in auth_js and "github\\.io" in auth_js)
+check("o auth.js decide entre /admin e /admin.html",
+      'EM_PAGINA_ESTATICA ? "/" + nome + ".html" : "/" + nome' in auth_js)
+for nome, texto in (("admin", painel_admin), ("home", home),
+                    ("login", login), ("painel", painel_cli)):
+    check(f"{nome}.html usa caminho RELATIVO nos assets (o Pages exige)",
+          'src="auth.js"' in texto and 'href="style.css"' in texto
+          and "/static/" not in texto,
+          "caminho com barra a esquerda quebra no site de projeto do Pages")
+    check(f"{nome}.html nao tem redirect cru para /admin ou /painel",
+          'location.replace("/admin")' not in texto
+          and 'location.replace("/painel")' not in texto
+          and 'location.replace("/?redir' not in texto,
+          "tem que usar Auth.pagina(), que resolve a diferenca entre os hosts")
+    check(f"{nome}.html nao pede sessao por /static/auth.js",
+          "Auth.obterSessao" in texto or "auth.js" in texto)
 
 # Nenhuma pagina pode usar uma variavel de cor que o style.css nao define:
 # quando isso acontece o `var(--x)` cai para vazio e a tela fica sem cor, sem
@@ -344,11 +384,11 @@ if tem_testclient:
     c = _com_auth()
     r = c.get("/")
     check("/ entrega a home de venda, nao o formulario",
-          'href="/login"' in r.text and 'id="form"' not in r.text)
+          'href="login.html"' in r.text and 'id="form"' not in r.text)
     c = _com_auth()
     r = c.get("/login")
     check("/login entrega o formulario, nao a home",
-          'id="form"' in r.text and 'href="/login"' not in r.text)
+          'id="form"' in r.text and 'href="login.html"' not in r.text)
 
     c = _com_auth()
     r = c.get("/api/config")

@@ -16,13 +16,54 @@
   // origem; no GitHub Pages a página é estática e aponta para o backend.
   var API_RENDER = "https://chatbotproject-1-l9zr.onrender.com";
   var ABRINDO_DO_DISCO = location.protocol === "file:";
-  var API_BASE =
-    /\.github\.io$/i.test(location.hostname) || ABRINDO_DO_DISCO ? API_RENDER : "";
+  var EM_PAGINA_ESTATICA = /\.github\.io$/i.test(location.hostname) || ABRINDO_DO_DISCO;
+  var API_BASE = EM_PAGINA_ESTATICA ? API_RENDER : "";
+
+  /* No GitHub Pages não existe servidor para rotear: a URL da home é
+   * ".../chatbotproject/" e a do painel seria ".../chatbotproject/admin",
+   * que o Pages procura como arquivo e devolve 404. Por isso, em página
+   * estática o caminho leva .html. No Render é o FastAPI que decide, e as
+   * rotas limpas (/admin) são o certo.
+   *
+   * E o caminho tem de ser RELATIVO, não "/auth.js": um site de projeto do
+   * Pages é servido em ".../chatbotproject/", então "/auth.js" pediria
+   * "https://jgabrielss-dev.github.io/auth.js" e daria 404.
 
   var CHAVE_USUARIO = "chatbotproject.usuario";
   var _sessao = null;
   var _config = null;
   var _carregandoConfig = null;
+
+  /* ---------------------------------------------------------------- rotas */
+
+  /** Caminho de uma tela, igual nos dois hosts mas escrito do jeito de cada um. */
+  function pagina(nome) {
+    if (nome === "index") {
+      // A home e index.html na raiz. No Pages ela responde em ".../repo/", sem
+      // o ".html"; mandar index.html ali funciona, mas a URL fica feia.
+      return EM_PAGINA_ESTATICA ? "./" : "/";
+    }
+    return EM_PAGINA_ESTATICA ? "/" + nome + ".html" : "/" + nome;
+  }
+
+  /** Para onde este usuário vai depois de entrar. */
+  function destino(eu, redir) {
+    if (redir && (redir !== "/admin" || eu.eh_admin)) {
+      return EM_PAGINA_ESTATICA ? redir.replace(/\/?$/, ".html").replace(".html.html", ".html")
+                                : redir;
+    }
+    return pagina(eu.eh_admin ? "admin" : "painel");
+  }
+
+  /** Volta para a home mantendo o destino na sessionStorage, para o ?redir. */
+  function irParaLogin() {
+    var atual = pagina(eu_admin_ou_painel_atual());
+    location.replace(pagina("login") + "?redir=" + encodeURIComponent(atual));
+  }
+
+  function eu_admin_ou_painel_atual() {
+    return /(?:^|\/)(admin|painel)/.test(location.pathname) ? "admin" : "painel";
+  }
 
   /* ---------------------------------------------------------------- config */
 
@@ -175,7 +216,9 @@
       })
       .then(function () {
         limparSessao();
-        location.replace("/");
+        // A home da aplicacao e index.html na raiz do repo (GitHub Pages). No
+        // Render, "/" ainda resolve para a home, entao os dois funcionam.
+        location.replace(pagina("index"));
       });
   }
 
@@ -221,6 +264,9 @@
     API_BASE: API_BASE,
     API_RENDER: API_RENDER,
     ABRINDO_DO_DISCO: ABRINDO_DO_DISCO,
+    EM_PAGINA_ESTATICA: EM_PAGINA_ESTATICA,
+    pagina: pagina,
+    destino: destino,
     config: config,
     obterSessao: obterSessao,
     cabecalhoAuth: cabecalhoAuth,

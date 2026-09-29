@@ -2,9 +2,24 @@
 __pycache__/
 *.pyc
 .env
+# Qualquer .env, nao so o da raiz: um .env.local ou .env.production com senha
+# subiria junto.
+*.env
+*.env.*
+!.env.example
 # Sessao do instagrapi: CONTEM o cookie sessionid, nunca versionar.
 data/
 app/data/
 instance.json
 session.json
+*.session
 supabase/.temp/
+
+# O GitHub Pages publica a raiz do repo inteira. As paginas do site moram na
+# raiz, entao qualquer backup ou temporario solto la seria publico.
+*.bak
+*.tmp
+*.orig
+*.rej
+.DS_Store
+Thumbs.db

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Meus chatbots Â· Chatbot Project</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="style.css">
 <style>
   /* O style.css do admin tem grid com sidebar. Aqui a sidebar vira barra de
      topo, porque o cliente navega por seÃ§Ãµes e nÃ£o por uma lista de agentes. */
@@ -131,7 +131,7 @@
   </div>
 </div>
 
-<script src="/static/auth.js"></script>
+<script src="auth.js"></script>
 <script>
 (async () => {
   const $ = (id) => document.getElementById(id);
@@ -150,7 +150,7 @@
       ...opts,
       headers: { "Content-Type": "application/json", ...Auth.cabecalhoAuth(), ...(opts.headers || {}) },
     });
-    if (r.status === 401) { location.replace("/?redir=/painel"); throw new Error("sem sessao"); }
+    if (r.status === 401) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
     if (r.status === 403) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "Acesso negado."); }
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || "Erro " + r.status);
@@ -159,8 +159,8 @@
 
   // ---- sessÃ£o -----------------------------------------------------------
   const eu = await Auth.obterSessao();
-  if (!eu) { location.replace("/?redir=/painel"); throw new Error("sem sessao"); }
-  if (eu.eh_admin) { location.replace("/admin"); throw new Error("e admin"); }
+  if (!eu) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
+  if (eu.eh_admin) { location.replace(Auth.pagina("admin")); throw new Error("e admin"); }
   $("euEmail").textContent = eu.email;
   $("btnSair").onclick = () => Auth.sair();
   Auth.esconderGate();

@@ -3,29 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chatbot Project - GestÃ£o de Agentes</title>
-<link rel="stylesheet" href="/static/style.css">
+<title>Chatbot Project - Gest├â┬úo de Agentes</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="toasts"></div>
 
   <div id="gate" class="gate">
     <div class="card">
-      <h2>Carregandoâ€¦</h2>
+      <h2>Carregando├óÔé¼┬ª</h2>
       <p class="muted" id="gateErro"></p>
     </div>
   </div>
 
 <aside>
   <h1>Chatbot Project</h1>
-  <p class="sub">GestÃ£o de agentes e canais</p>
+  <p class="sub">Gest├â┬úo de agentes e canais</p>
   <button class="btn sm" id="btnContas" style="width:100%;margin-top:6px">Contas</button>
   <button class="btn primary" id="btnNovo" style="width:100%">+ Novo agente</button>
   <div class="row" style="margin-top:8px">
     <button class="btn sm" id="btnSair" style="flex:1">Sair</button>
   </div>
   <div id="listaAgentes" style="margin-top:14px"></div>
-  <p class="aviso">Sem cobranÃ§a nesta fase. Todos os agentes usam a mesma chave Gemini configurada no servidor.</p>
+  <p class="aviso">Sem cobran├â┬ºa nesta fase. Todos os agentes usam a mesma chave Gemini configurada no servidor.</p>
 </aside>
 
   <div class="card hidden" id="contasCard" style="margin:0 0 12px">
@@ -34,8 +34,8 @@
       <button class="btn sm" id="btnFecharContas">Fechar</button>
     </div>
     <p class="muted">
-      Quem pode entrar, com que papel, e de quem Ã© cada agente. O papel vem do
-      servidor â€” o botÃ£o aqui sÃ³ pede a mudanÃ§a.
+      Quem pode entrar, com que papel, e de quem ├â┬® cada agente. O papel vem do
+      servidor ├óÔé¼ÔÇØ o bot├â┬úo aqui s├â┬│ pede a mudan├â┬ºa.
     </p>
     <div id="contasLista"></div>
   </div>
@@ -45,7 +45,7 @@
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">Fila de mensagens</h2>
       <div class="row">
-        <span class="saude" id="filaResumo">carregandoâ€¦</span>
+        <span class="saude" id="filaResumo">carregando├óÔé¼┬ª</span>
         <button class="btn sm" id="btnAtualizarFila">Atualizar</button>
       </div>
     </div>
@@ -57,7 +57,7 @@
     <label>Nome</label>
     <input type="text" id="nome" placeholder="Ex.: NutriTreino">
     <label>System prompt (regras e personalidade da IA)</label>
-    <textarea id="prompt" placeholder="VocÃª Ã© um assistente que..."></textarea>
+    <textarea id="prompt" placeholder="Voc├â┬¬ ├â┬® um assistente que..."></textarea>
     <label class="row" style="margin-top:10px"><input type="checkbox" id="ativo" checked> Agente ativo</label>
     <div class="row" style="margin-top:12px">
       <button class="btn primary" id="btnSalvar">Salvar</button>
@@ -68,13 +68,13 @@
   <div id="detalhe" class="hidden">
     <div class="card">
       <div class="row" style="justify-content:space-between">
-        <h2 style="margin:0" id="detalheNome">â€”</h2>
+        <h2 style="margin:0" id="detalheNome">├óÔé¼ÔÇØ</h2>
         <div class="row">
           <button class="btn" id="btnEditar">Editar</button>
           <button class="btn danger" id="btnExcluirAgente">Excluir agente</button>
         </div>
       </div>
-      <div class="row" style="margin-top:8px"><span class="badge" id="badgeAtivo">â€”</span></div>
+      <div class="row" style="margin-top:8px"><span class="badge" id="badgeAtivo">├óÔé¼ÔÇØ</span></div>
       <div id="promptPreview" class="muted" style="margin-top:10px;white-space:pre-wrap"></div>
     </div>
 
@@ -83,15 +83,15 @@
         <h2 style="margin:0">Canais</h2>
         <div class="row">
           <select id="novoCanalTipo" style="width:290px">
-            <optgroup label="Oficiais (Meta) â€” estÃ¡veis, sem keepalive">
+            <optgroup label="Oficiais (Meta) ├óÔé¼ÔÇØ est├â┬íveis, sem keepalive">
               <option value="whatsapp_oficial">WhatsApp oficial (Cloud API)</option>
               <option value="instagram_oficial">Instagram oficial (Messaging API)</option>
             </optgroup>
             <optgroup label="Oficiais (outros)">
               <option value="telegram">Telegram</option>
-              <option value="webhook">Webhook genÃ©rico</option>
+              <option value="webhook">Webhook gen├â┬®rico</option>
             </optgroup>
-            <optgroup label="âš  NÃ£o oficiais â€” risco de ban">
+            <optgroup label="├ó┼í┬á N├â┬úo oficiais ├óÔé¼ÔÇØ risco de ban">
               <option value="whatsapp">WhatsApp (Evolution/Baileys)</option>
               <option value="instagram">Instagram (instagrapi)</option>
             </optgroup>
@@ -105,7 +105,7 @@
   </div>
 </main>
 
-<script src="/static/auth.js"></script>
+<script src="auth.js"></script>
 <script>
 (async () => {
 const $ = (id) => document.getElementById(id);
@@ -141,23 +141,23 @@ const api = async (url, opts = {}, tentativa = 0) => {
       headers: { "Content-Type": "application/json", ...cabecalhoAuth(), ...(opts.headers || {}) },
     });
   } catch (e) {
-    // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda estÃ¡
-    // acordando do hibernamento do plano grÃ¡tis. Uma retentativa resolve a
+    // "Failed to fetch": caiu a rede, o CORS bloqueou ou o Render ainda est├â┬í
+    // acordando do hibernamento do plano gr├â┬ítis. Uma retentativa resolve a
     // esmagadora maioria dos casos.
     if (tentativa < 2) {
-      if (tentativa === 0) toast("Servidor nÃ£o respondeu, tentando de novoâ€¦", "err");
+      if (tentativa === 0) toast("Servidor n├â┬úo respondeu, tentando de novo├óÔé¼┬ª", "err");
       await new Promise((r2) => setTimeout(r2, 3000));
       return api(url, opts, tentativa + 1);
     }
     throw new Error(
       ABRINDO_DO_DISCO
-        ? "NÃ£o foi possÃ­vel falar com a API. Abra o painel pelo endereÃ§o do Render em vez de abrir o arquivo do disco."
-        : "NÃ£o foi possÃ­vel falar com a API (" + API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto."
+        ? "N├â┬úo foi poss├â┬¡vel falar com a API. Abra o painel pelo endere├â┬ºo do Render em vez de abrir o arquivo do disco."
+        : "N├â┬úo foi poss├â┬¡vel falar com a API (" + API_BASE + "). O servidor do Render pode estar hibernando: tente de novo em ~1 minuto."
     );
   }
   if (r.status === 401) {
-    location.replace("/?redir=" + encodeURIComponent(location.pathname));
-    throw new Error("nÃ£o autorizado");
+    location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("admin")));
+    throw new Error("n├â┬úo autorizado");
   }
   if (!r.ok) {
     let msg = r.statusText;
@@ -244,7 +244,7 @@ $("btnExcluirAgente").onclick = async () => {
   if (!confirm("Excluir o agente \"" + agenteAtual.nome + "\" e todos os canais dele?")) return;
   try {
     await api(`/api/agentes/${agenteAtual.id}`, { method: "DELETE" });
-    toast("Agente excluÃ­do.", "ok");
+    toast("Agente exclu├â┬¡do.", "ok");
     agenteAtual = null;
     $("detalhe").classList.add("hidden");
     await carregarAgentes();
@@ -259,7 +259,7 @@ async function carregarCanais(agenteId) {
   const el = $("canais");
   el.innerHTML = "";
   if (!canais.length) {
-    el.innerHTML = '<p class="aviso">Nenhum canal ainda. Crie um para o agente comeÃ§ar a responder.</p>';
+    el.innerHTML = '<p class="aviso">Nenhum canal ainda. Crie um para o agente come├â┬ºar a responder.</p>';
     return;
   }
   for (const c of canais) el.appendChild(renderCanal(c));
@@ -271,8 +271,8 @@ const ROTULO_TIPO = {
   instagram_oficial: "Instagram (oficial)",
   telegram: "Telegram",
   webhook: "Webhook",
-  whatsapp: "WhatsApp (nÃ£o-oficial)",
-  instagram: "Instagram (nÃ£o-oficial)",
+  whatsapp: "WhatsApp (n├â┬úo-oficial)",
+  instagram: "Instagram (n├â┬úo-oficial)",
 };
 
 function renderCanal(c) {
@@ -284,7 +284,7 @@ function renderCanal(c) {
     <div class="head">
       <span><strong>${esc(c.nome)}</strong>
         <span class="badge tipo">${esc(tipo)}</span>
-        ${naoOficial ? `<span class="badge off" title="IntegraÃ§Ã£o nÃ£o oficial: pode falhar ou banir a conta">âš  ${esc(naoOficial)}</span>` : ""}
+        ${naoOficial ? `<span class="badge off" title="Integra├â┬º├â┬úo n├â┬úo oficial: pode falhar ou banir a conta">├ó┼í┬á ${esc(naoOficial)}</span>` : ""}
         <span class="badge ${c.ativo ? "on" : "off"}">${c.ativo ? "ativo" : "pausado"}</span></span>
       <span class="row">
         <button class="btn sm" data-acao="testar">Testar</button>
@@ -296,7 +296,7 @@ function renderCanal(c) {
   div.querySelector('[data-acao="testar"]').onclick = (e) => testar(c.id, e.currentTarget);
   div.querySelector('[data-acao="excluir"]').onclick = async () => {
     if (!confirm("Excluir o canal \"" + c.nome + "\"?")) return;
-    try { await api(`/api/canais/${c.id}`, { method: "DELETE" }); toast("Canal excluÃ­do.", "ok"); carregarCanais(agenteAtual.id); }
+    try { await api(`/api/canais/${c.id}`, { method: "DELETE" }); toast("Canal exclu├â┬¡do.", "ok"); carregarCanais(agenteAtual.id); }
     catch (e) { toast("Erro: " + e.message, "err"); }
   };
   div.querySelector('[data-acao="editar"]').onclick = () => {
@@ -314,7 +314,7 @@ async function webhookUrl(c) {
 function copiar(texto, btn) {
   navigator.clipboard.writeText(texto).then(
     () => { const o = btn.textContent; btn.textContent = "Copiado!"; setTimeout(() => (btn.textContent = o), 1500); },
-    () => toast("NÃ£o foi possÃ­vel copiar.", "err")
+    () => toast("N├â┬úo foi poss├â┬¡vel copiar.", "err")
   );
 }
 
@@ -325,7 +325,7 @@ async function renderCanalBody(div, c) {
   if (tipo === "telegram") {
     const url = await webhookUrl(c);
     body.innerHTML = `
-      <p class="muted">Token do bot: <code>${c.config.token ? "definido (oculto)" : "nÃ£o definido"}</code></p>
+      <p class="muted">Token do bot: <code>${c.config.token ? "definido (oculto)" : "n├â┬úo definido"}</code></p>
       <label>Webhook a registrar no bot</label>
       <div class="row"><input type="text" readonly value="${esc(url)}">
         <button class="btn sm" data-copy>Copiar</button></div>
@@ -346,8 +346,8 @@ async function renderCanalBody(div, c) {
   } else if (tipo === "whatsapp") {
     const estado = c.config.status || "desconectado";
     body.innerHTML = `
-      <p class="muted">InstÃ¢ncia: <code>${esc(c.config.instance_name || "")}</code>
-        &middot; escaneie o QR com o WhatsApp no celular que serÃ¡ usado pelo bot.</p>
+      <p class="muted">Inst├â┬óncia: <code>${esc(c.config.instance_name || "")}</code>
+        &middot; escaneie o QR com o WhatsApp no celular que ser├â┬í usado pelo bot.</p>
       <div class="row" style="margin-top:10px">
         <button class="btn" id="waConectar">Gerar novo QR</button>
         <button class="btn danger" id="waDesc">Desconectar</button>
@@ -370,7 +370,7 @@ async function renderCanalBody(div, c) {
           qrEl.innerHTML = '<p class="badge on">Conectado!</p>';
           clearInterval(timers[c.id]); delete timers[c.id];
         }
-      } catch (e) { /* instÃ¢ncia ainda nÃ£o criada */ }
+      } catch (e) { /* inst├â┬óncia ainda n├â┬úo criada */ }
     };
     body.querySelector("#waConectar").onclick = async (e) => {
       const btn = e.currentTarget; btn.disabled = true;
@@ -393,38 +393,38 @@ async function renderCanalBody(div, c) {
 
   } else if (tipo === "instagram") {
     body.innerHTML = `
-      <div class="warn"><strong>MÃ©todo NÃƒO-oficial (instagrapi / API privada).</strong> Viola os Termos de Uso
-      do Instagram e pode <strong>banir a conta</strong>; os endpoints privados mudam sem aviso e a sessÃ£o expira.
-      Para produÃ§Ã£o e estabilidade, prefira <strong>Instagram (oficial &mdash; Messaging API)</strong>.</div>
-      <p class="muted" style="margin-top:8px">sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "nÃ£o definido"}</code>
-      &middot; pedidos de contato sÃ£o aprovados automaticamente
-      &middot; as DMs sÃ£o lidas por polling (~25s).</p>`;
+      <div class="warn"><strong>M├â┬®todo N├âãÆO-oficial (instagrapi / API privada).</strong> Viola os Termos de Uso
+      do Instagram e pode <strong>banir a conta</strong>; os endpoints privados mudam sem aviso e a sess├â┬úo expira.
+      Para produ├â┬º├â┬úo e estabilidade, prefira <strong>Instagram (oficial &mdash; Messaging API)</strong>.</div>
+      <p class="muted" style="margin-top:8px">sessionid: <code>${c.config.sessionid ? "definido (oculto)" : "n├â┬úo definido"}</code>
+      &middot; pedidos de contato s├â┬úo aprovados automaticamente
+      &middot; as DMs s├â┬úo lidas por polling (~25s).</p>`;
 
   } else if (tipo === "instagram_oficial" || tipo === "whatsapp_oficial") {
-    const url = esc(c.config.webhook_url || "â€”");
+    const url = esc(c.config.webhook_url || "├óÔé¼ÔÇØ");
     const familia = tipo === "instagram_oficial" ? "Instagram" : "WhatsApp";
     const nomeId = tipo === "instagram_oficial" ? "Instagram Business Account ID" : "Phone Number ID";
     body.innerHTML = `
-      <div class="aviso-ok"><strong>MÃ©todo OFICIAL da Meta.</strong> Webhook direto, sem polling e
-      <strong>sem keepalive</strong>: o Render pode hibernar e sÃ³ acorda quando chega mensagem.</div>
-      <p class="muted" style="margin-top:10px"><strong>${nomeId}:</strong> <code>${esc(c.config[tipo === "instagram_oficial" ? "ig_user_id" : "phone_number_id"] || "â€”")}</code>
-      &middot; <strong>verify_token:</strong> <code>${c.config.verify_token ? "definido (oculto)" : "nÃ£o definido"}</code>
-      &middot; <strong>app_secret:</strong> <code>${c.config.app_secret ? "definido (oculto)" : "nÃ£o definido â€” assine a assinatura para ativar o canal"}</code></p>
-      <p class="muted" style="margin-top:8px">Cole esta URL em <em>Meta for Developers â†’ WhatsApp/Instagram â†’ Webhooks</em>
+      <div class="aviso-ok"><strong>M├â┬®todo OFICIAL da Meta.</strong> Webhook direto, sem polling e
+      <strong>sem keepalive</strong>: o Render pode hibernar e s├â┬│ acorda quando chega mensagem.</div>
+      <p class="muted" style="margin-top:10px"><strong>${nomeId}:</strong> <code>${esc(c.config[tipo === "instagram_oficial" ? "ig_user_id" : "phone_number_id"] || "├óÔé¼ÔÇØ")}</code>
+      &middot; <strong>verify_token:</strong> <code>${c.config.verify_token ? "definido (oculto)" : "n├â┬úo definido"}</code>
+      &middot; <strong>app_secret:</strong> <code>${c.config.app_secret ? "definido (oculto)" : "n├â┬úo definido ├óÔé¼ÔÇØ assine a assinatura para ativar o canal"}</code></p>
+      <p class="muted" style="margin-top:8px">Cole esta URL em <em>Meta for Developers ├óÔÇáÔÇÖ WhatsApp/Instagram ├óÔÇáÔÇÖ Webhooks</em>
       e assine o campo <code>messages</code>:</p>
       <div class="row"><input type="text" readonly value="${url}">
         <button class="btn sm" data-copy>Copiar</button></div>
-      <p class="muted" style="margin-top:6px">O roteamento usa o ${nomeId} do prÃ³prio evento,
-      entÃ£o nÃ£o hÃ¡ segredo na URL. O <code>app_secret</code> Ã© <strong>obrigatÃ³rio</strong>:
-      sem ele a assinatura <code>X-Hub-Signature-256</code> nÃ£o pode ser conferida e o canal
-      Ã© recusado, porque qualquer pessoa poderia forjar mensagens no seu robÃ´.</p>`;
+      <p class="muted" style="margin-top:6px">O roteamento usa o ${nomeId} do pr├â┬│prio evento,
+      ent├â┬úo n├â┬úo h├â┬í segredo na URL. O <code>app_secret</code> ├â┬® <strong>obrigat├â┬│rio</strong>:
+      sem ele a assinatura <code>X-Hub-Signature-256</code> n├â┬úo pode ser conferida e o canal
+      ├â┬® recusado, porque qualquer pessoa poderia forjar mensagens no seu rob├â┬┤.</p>`;
     const b = body.querySelector("[data-copy]");
     if (b) b.onclick = (e) => copiar(c.config.webhook_url || "", e.currentTarget);
 
   } else if (tipo === "webhook") {
     const url = await webhookUrl(c);
     body.innerHTML = `
-      <p class="muted">URL para o cliente integrar (POST JSON <code>{ "text": ..., "user": ... }</code> â†’ responde <code>{ "reply": ... }</code>):</p>
+      <p class="muted">URL para o cliente integrar (POST JSON <code>{ "text": ..., "user": ... }</code> ├óÔÇáÔÇÖ responde <code>{ "reply": ... }</code>):</p>
       <div class="row"><input type="text" readonly value="${esc(url)}">
         <button class="btn sm" data-copy>Copiar</button></div>
       <pre>curl -X POST "${esc(url)}" -H "Content-Type: application/json" -d '{"text":"oi","user":"cliente1"}'</pre>`;
@@ -443,9 +443,9 @@ async function testar(canalId, btn) {
 }
 
 /* ---------------- Fila de mensagens ---------------- */
-// VisÃ£o limpa por padrÃ£o: sÃ³ os contadores. A mensagem que estÃ¡ presa aparece
-// como uma linha curta e o erro cru (stack do Gemini, erro da Evolution) sÃ³
-// aparece quando o usuÃ¡rio clica em "detalhes".
+// Vis├â┬úo limpa por padr├â┬úo: s├â┬│ os contadores. A mensagem que est├â┬í presa aparece
+// como uma linha curta e o erro cru (stack do Gemini, erro da Evolution) s├â┬│
+// aparece quando o usu├â┬írio clica em "detalhes".
 const ROTULO_STATUS = {
   pendente: ["na fila", "tipo"],
   processando: ["processando", "on"],
@@ -511,15 +511,15 @@ async function atualizarFila() {
   try {
     renderFila(await api("/api/caixa"));
   } catch (e) {
-    if (e.message !== "nÃ£o autorizado") {
-      $("filaResumo").innerHTML = '<span class="badge err">fila indisponÃ­vel</span>';
+    if (e.message !== "n├â┬úo autorizado") {
+      $("filaResumo").innerHTML = '<span class="badge err">fila indispon├â┬¡vel</span>';
     }
   }
 }
 
 $("btnAtualizarFila").onclick = atualizarFila;
 
-/* ---------------- FormulÃ¡rios de canal ---------------- */
+/* ---------------- Formul├â┬írios de canal ---------------- */
 
 function camposPorTipo(tipo, config = {}, novo = false) {
   const ph = (v, dica) => (novo ? "" : (v ? dica : ""));
@@ -530,44 +530,44 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
     <ol class="muted" style="margin:4px 0 0 18px">
       <li>Fale com <code>@BotFather</code> no Telegram e mande <code>/newbot</code>.</li>
-      <li>DÃª um nome e um username terminados em <code>bot</code>.</li>
-      <li>Copie o token (nÃºmeros e <code>:</code>) e cole acima.</li>
-      <li>Salve o canal e clique em <strong>registrar webhook</strong>: Ã© o passo que faz a
-          mensagem chegar. A URL jÃ¡ carrega o segredo do canal â€” nÃ£o edite Ã  mÃ£o.</li>
+      <li>D├â┬¬ um nome e um username terminados em <code>bot</code>.</li>
+      <li>Copie o token (n├â┬║meros e <code>:</code>) e cole acima.</li>
+      <li>Salve o canal e clique em <strong>registrar webhook</strong>: ├â┬® o passo que faz a
+          mensagem chegar. A URL j├â┬í carrega o segredo do canal ├óÔé¼ÔÇØ n├â┬úo edite ├â┬á m├â┬úo.</li>
     </ol>
     <p class="muted">Se trocar o token depois, clique em "registrar webhook" de novo.</p>`;
   if (tipo === "whatsapp") return `
-    <p class="muted">Nenhuma credencial necessÃ¡ria â€” a plataforma jÃ¡ possui a Evolution configurada.
-      Uma instÃ¢ncia nova Ã© criada e o QR Code aparece logo abaixo do nome do canal.</p>
+    <p class="muted">Nenhuma credencial necess├â┬íria ├óÔé¼ÔÇØ a plataforma j├â┬í possui a Evolution configurada.
+      Uma inst├â┬óncia nova ├â┬® criada e o QR Code aparece logo abaixo do nome do canal.</p>
     <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
     <ol class="muted" style="margin:4px 0 0 18px">
       <li>Salve o canal com um nome qualquer (ex.: <code>WhatsApp Principal</code>).</li>
       <li>Abra o WhatsApp no celular &rarr; <em>Aparelhos conectados</em> &rarr; <em>Conectar um
           aparelho</em> e escaneie o QR que aparece na tela.</li>
-      <li>Se o QR vencer, use o botÃ£o de reconectar â€” o cÃ³digo se renova sozinho.</li>
-      <li>A URL de webhook da instÃ¢ncia Ã© conferida e corrigida a cada ~10 min, entÃ£o nÃ£o
-          precisa registrar nada na mÃ£o.</li>
+      <li>Se o QR vencer, use o bot├â┬úo de reconectar ├óÔé¼ÔÇØ o c├â┬│digo se renova sozinho.</li>
+      <li>A URL de webhook da inst├â┬óncia ├â┬® conferida e corrigida a cada ~10 min, ent├â┬úo n├â┬úo
+          precisa registrar nada na m├â┬úo.</li>
     </ol>
-    <p class="muted">Ã‰ o canal <strong>nÃ£o oficial</strong> (Baileys): funciona sem chip e
-      sem custo, mas viola os termos do WhatsApp e pode banir o nÃºmero.</p>`;
+    <p class="muted">├âÔÇ░ o canal <strong>n├â┬úo oficial</strong> (Baileys): funciona sem chip e
+      sem custo, mas viola os termos do WhatsApp e pode banir o n├â┬║mero.</p>`;
   if (tipo === "instagram") return `
-    <div class="warn"><strong>MÃ©todo NÃƒO-oficial (instagrapi).</strong> Ative apenas com <code>sessionid</code>:
-    o login por senha foi desativado pelo prÃ³prio Instagram (exigÃªncia de atestaÃ§Ã£o de app), e esta API
-    pode <strong>banir a conta</strong>. Em produÃ§Ã£o, prefira o canal oficial da Meta.</div>
-    <label>sessionid (obrigatÃ³rio)</label>
+    <div class="warn"><strong>M├â┬®todo N├âãÆO-oficial (instagrapi).</strong> Ative apenas com <code>sessionid</code>:
+    o login por senha foi desativado pelo pr├â┬│prio Instagram (exig├â┬¬ncia de atesta├â┬º├â┬úo de app), e esta API
+    pode <strong>banir a conta</strong>. Em produ├â┬º├â┬úo, prefira o canal oficial da Meta.</div>
+    <label>sessionid (obrigat├â┬│rio)</label>
     <input type="password" data-config="sessionid" value="${val(config.sessionid)}"
       placeholder="${novo ? "" : "deixe em branco para manter"}">
     <p class="muted" style="margin-top:6px"><strong>Como obter o sessionid:</strong></p>
     <ol class="muted" style="margin:4px 0 0 18px">
-      <li>Abra <code>https://www.instagram.com</code> e faÃ§a login normalmente.</li>
+      <li>Abra <code>https://www.instagram.com</code> e fa├â┬ºa login normalmente.</li>
       <li>Pressione <code>F12</code> e abra a aba <em>Application</em> (Chrome) ou <em>Storage</em> (Edge).</li>
       <li>Em <em>Cookies</em> &rarr; <code>https://www.instagram.com</code>, localize <code>sessionid</code>.</li>
-      <li>Copie o valor (comeÃ§a com dÃ­gitos e dois-pontos) e cole no campo acima.</li>
+      <li>Copie o valor (come├â┬ºa com d├â┬¡gitos e dois-pontos) e cole no campo acima.</li>
     </ol>
     <p class="muted" style="margin-top:6px">O cookie expira: quando o canal parar de responder, repita os passos.
-    A conta pode pedir confirmaÃ§Ã£o 2FA no celular em alguns casos.</p>`;
+    A conta pode pedir confirma├â┬º├â┬úo 2FA no celular em alguns casos.</p>`;
   if (tipo === "whatsapp_oficial") return `
-    <div class="aviso-ok"><strong>MÃ©todo OFICIAL</strong> (WhatsApp Cloud API). Sem QR, sem keepalive, sem risco de ban.</div>
+    <div class="aviso-ok"><strong>M├â┬®todo OFICIAL</strong> (WhatsApp Cloud API). Sem QR, sem keepalive, sem risco de ban.</div>
     <div class="grid-2">
       <div><label>Phone Number ID</label><input type="text" data-config="phone_number_id" value="${val(config.phone_number_id)}"
         placeholder="${novo ? "123456789012345" : ""}"></div>
@@ -576,24 +576,24 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     </div>
     <label>Access token permanente</label>
     <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
-    <label>app secret (obrigatÃ³rio â€” valida a assinatura do webhook)</label>
+    <label>app secret (obrigat├â┬│rio ├óÔé¼ÔÇØ valida a assinatura do webhook)</label>
     <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
     <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
     <ol class="muted" style="margin:4px 0 0 18px">
       <li><code>developers.facebook.com</code> &rarr; seu app &rarr; <em>WhatsApp</em> &rarr;
           <em>API Setup</em>. Copie o <strong>Phone Number ID</strong> e o
           <strong>Access token</strong> (gere um permanente em <em>WhatsApp &gt; Configuration</em>).</li>
-      <li><em>ConfiguraÃ§Ãµes &gt; BÃ¡sico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li><em>Configura├â┬º├â┬Áes &gt; B├â┬ísico</em> &rarr; copie o <strong>App secret</strong>.</li>
       <li>Escolha um <strong>verify_token</strong> (pode ser qualquer texto seu) e salve o canal.</li>
       <li>Copie a <strong>URL de webhook</strong> exibida no card do canal e cole em
-          <em>ConfiguraÃ§Ãµes &gt; Webhooks</em>; assine o campo <code>messages</code>.</li>
+          <em>Configura├â┬º├â┬Áes &gt; Webhooks</em>; assine o campo <code>messages</code>.</li>
       <li>Clique em <strong>Verificar e salvar</strong> no painel da Meta. Sem o
-          <code>app_secret</code> a assinatura nÃ£o fecha e o canal rejeita tudo.</li>
+          <code>app_secret</code> a assinatura n├â┬úo fecha e o canal rejeita tudo.</li>
     </ol>
-    <p class="muted">O nÃºmero precisa estar na conta do app, e o webhook Ã© chamado pela Meta
-      direto na Edge Function â€” por isso nÃ£o hÃ¡ keepalive e o Render pode hibernar.</p>`;
+    <p class="muted">O n├â┬║mero precisa estar na conta do app, e o webhook ├â┬® chamado pela Meta
+      direto na Edge Function ├óÔé¼ÔÇØ por isso n├â┬úo h├â┬í keepalive e o Render pode hibernar.</p>`;
   if (tipo === "instagram_oficial") return `
-    <div class="aviso-ok"><strong>MÃ©todo OFICIAL</strong> (Instagram Messaging API). Webhook direto, sem polling.</div>
+    <div class="aviso-ok"><strong>M├â┬®todo OFICIAL</strong> (Instagram Messaging API). Webhook direto, sem polling.</div>
     <div class="grid-2">
       <div><label>Instagram Business Account ID</label><input type="text" data-config="ig_user_id" value="${val(config.ig_user_id)}"
         placeholder="${novo ? "17841400..." : ""}"></div>
@@ -602,7 +602,7 @@ function camposPorTipo(tipo, config = {}, novo = false) {
     </div>
     <label>Access token permanente</label>
     <input type="password" data-config="access_token" value="${val(config.access_token)}" placeholder="${novo ? "" : "deixe em branco para manter"}">
-    <label>app secret (obrigatÃ³rio â€” valida a assinatura do webhook)</label>
+    <label>app secret (obrigat├â┬│rio ├óÔé¼ÔÇØ valida a assinatura do webhook)</label>
     <input type="password" data-config="app_secret" value="${val(config.app_secret)}" placeholder="${novo ? "App Settings > Basic > App secret" : "deixe em branco para manter"}">
     <p class="muted" style="margin-top:6px"><strong>Passo a passo:</strong></p>
     <ol class="muted" style="margin:4px 0 0 18px">
@@ -610,22 +610,22 @@ function camposPorTipo(tipo, config = {}, novo = false) {
           ligado a um app.</li>
       <li><em>Instagram &gt; API Setup</em> &rarr; copie o <strong>Instagram Business Account ID</strong>
           e o <strong>Access token</strong> (gere permanente em <em>Instagram &gt; Configuration</em>).</li>
-      <li><em>ConfiguraÃ§Ãµes &gt; BÃ¡sico</em> &rarr; copie o <strong>App secret</strong>.</li>
+      <li><em>Configura├â┬º├â┬Áes &gt; B├â┬ísico</em> &rarr; copie o <strong>App secret</strong>.</li>
       <li>Escolha um <strong>verify_token</strong>, salve o canal e cole a <strong>URL de webhook</strong>
-          exibida no card em <em>ConfiguraÃ§Ãµes &gt; Webhooks</em>, assinando <code>messages</code>.</li>
-      <li>No perfil do Instagram, toque no botÃ£o de mensagem e confirme que a conta pode
+          exibida no card em <em>Configura├â┬º├â┬Áes &gt; Webhooks</em>, assinando <code>messages</code>.</li>
+      <li>No perfil do Instagram, toque no bot├â┬úo de mensagem e confirme que a conta pode
           receber mensagens (a Meta exige isso para liberar o Messaging API).</li>
     </ol>`;
   if (tipo === "webhook") return `
-    <p class="muted">Nenhuma credencial necessÃ¡ria. Salve o canal e a URL com o segredo Ã© gerada automaticamente.</p>
+    <p class="muted">Nenhuma credencial necess├â┬íria. Salve o canal e a URL com o segredo ├â┬® gerada automaticamente.</p>
     <p class="muted" style="margin-top:6px"><strong>Como chamar (a resposta vem no mesmo request):</strong></p>
     <pre class="mono" style="background:#111;color:#eee;padding:10px;border-radius:8px;overflow:auto">&nbsp;curl -X POST "URL_DO_CANAL" \\
 &nbsp;  -H "Content-Type: application/json" \\
 &nbsp;  -d '{"user":"joao","text":"oi, quero um orcamento"}'</pre>
     <p class="muted">A resposta vem em <code>{"reply":"...","status":"respondido"}</code>. Se a IA demorar
-      mais que ~30 s, o retorno Ã© <code>202 {"status":"na_fila"}</code> e a mensagem <strong>nÃ£o Ã© perdida</strong>:
-      o worker responde depois, com retry automÃ¡tico. Use <code>text</code> ou <code>texto</code>, e
-      <code>user</code> ou <code>remetente</code> â€” todas as grafias sÃ£o aceitas.</p>`;
+      mais que ~30 s, o retorno ├â┬® <code>202 {"status":"na_fila"}</code> e a mensagem <strong>n├â┬úo ├â┬® perdida</strong>:
+      o worker responde depois, com retry autom├â┬ítico. Use <code>text</code> ou <code>texto</code>, e
+      <code>user</code> ou <code>remetente</code> ├óÔé¼ÔÇØ todas as grafias s├â┬úo aceitas.</p>`;
   return "";
 }
 
@@ -641,7 +641,7 @@ function formCanal(c, onCancel) {
     <label>Nome do canal</label>
     <input type="text" id="cNome" value="${esc(c.nome)}">
     <label>Ativo</label>
-    <select id="cAtivo"><option value="true">Sim</option><option value="false">NÃ£o</option></select>
+    <select id="cAtivo"><option value="true">Sim</option><option value="false">N├â┬úo</option></select>
     ${camposPorTipo(c.tipo, c.config, false)}
     <div class="row" style="margin-top:12px">
       <button class="btn primary" id="cSalvar">Salvar canal</button>
@@ -688,8 +688,8 @@ function mostrarFormNovoCanal() {
     if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
     const config = coletarConfig(cont);
     if (tipo === "telegram" && !config.token) { toast("Informe o token do bot.", "err"); return; }
-    // Instagram nÃ£o-oficial Ã© sessionid-only: o login por senha foi desativado
-    // pelo prÃ³prio Instagram, entÃ£o usuÃ¡rio/senha nÃ£o sÃ£o campos, e sim erro.
+    // Instagram n├â┬úo-oficial ├â┬® sessionid-only: o login por senha foi desativado
+    // pelo pr├â┬│prio Instagram, ent├â┬úo usu├â┬írio/senha n├â┬úo s├â┬úo campos, e sim erro.
     if (tipo === "instagram" && !config.sessionid) { toast("Informe o sessionid do Instagram.", "err"); return; }
     if (tipo === "instagram_oficial" && (!config.ig_user_id || !config.access_token || !config.verify_token || !config.app_secret)) {
       toast("Informe ig_user_id, access_token, verify_token e app_secret.", "err"); return;
@@ -715,15 +715,15 @@ $("btnNovoCanal").onclick = () => {
 
 
 // ---------- contas ----------
-// SÃ³ o admin chega aqui, e a API re-checa o papel em /api/admin/contas: esta
-// tela esconder o botÃ£o nÃ£o Ã© o que protege nada, o `exigir_admin` no servidor Ã©.
+// S├â┬│ o admin chega aqui, e a API re-checa o papel em /api/admin/contas: esta
+// tela esconder o bot├â┬úo n├â┬úo ├â┬® o que protege nada, o `exigir_admin` no servidor ├â┬®.
 let contasCache = [];
 
 async function alternarContas() {
   const card = $("contasCard");
   card.classList.toggle("hidden");
   if (card.classList.contains("hidden")) return;
-  $("contasLista").innerHTML = '<p class="muted">carregandoâ€¦</p>';
+  $("contasLista").innerHTML = '<p class="muted">carregando├óÔé¼┬ª</p>';
   await carregarContas();
 }
 
@@ -744,9 +744,9 @@ async function carregarContas() {
         <strong>${esc(c.email || c.id)}</strong>
         <div class="muted">
           ${c.role === "admin" ? "admin" : "cliente"}
-          ${c.bloqueado ? " Â· <span style='color:var(--danger)'>bloqueado</span>" : ""}
-          Â· ${c.agentes} agente${c.agentes === 1 ? "" : "s"}
-          ${c.criado_em ? " Â· " + new Date(c.criado_em).toLocaleDateString("pt-BR") : ""}
+          ${c.bloqueado ? " ├é┬À <span style='color:var(--danger)'>bloqueado</span>" : ""}
+          ├é┬À ${c.agentes} agente${c.agentes === 1 ? "" : "s"}
+          ${c.criado_em ? " ├é┬À " + new Date(c.criado_em).toLocaleDateString("pt-BR") : ""}
         </div>
       </div>
       <div class="row">
@@ -778,7 +778,7 @@ async function mudarConta(contaId, acao) {
     toast("Conta atualizada.");
     await carregarContas();
   } catch (e) {
-    // O "Ãºltimo admin" volta como 400 e a mensagem explica o porquÃª.
+    // O "├â┬║ltimo admin" volta como 400 e a mensagem explica o porqu├â┬¬.
     toast(e.message, "err");
   }
 }
@@ -791,10 +791,10 @@ $("btnFecharContas").onclick = () => $("contasCard").classList.add("hidden");
 // cliente -> /painel. So o admin chega a carregar o painel.
 const eu = await Auth.obterSessao();
 if (!eu) {
-  location.replace("/?redir=" + encodeURIComponent(location.pathname));
+  location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("admin")));
   throw new Error("sem sessao");  // aborta antes de qualquer fetch
 }
-if (!eu.eh_admin) { location.replace("/painel"); throw new Error("nao e admin"); }
+if (!eu.eh_admin) { location.replace(Auth.pagina("painel")); throw new Error("nao e admin"); }
 
 $("btnSair").onclick = () => Auth.sair();
 $("btnContas").onclick = () => alternarContas();
@@ -804,7 +804,7 @@ await carregarAgentes();
 atualizarFila();
 timerFila = setInterval(atualizarFila, 15000);
 if (ABRINDO_DO_DISCO) {
-  toast("VocÃª abriu o arquivo do disco: a API estÃ¡ em " + API_RENDER + ". Melhor usar o endereÃ§o do servidor.", "err");
+  toast("Voc├â┬¬ abriu o arquivo do disco: a API est├â┬í em " + API_RENDER + ". Melhor usar o endere├â┬ºo do servidor.", "err");
 }
 })();
 </script>

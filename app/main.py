@@ -36,11 +36,17 @@ log = logging.getLogger("main")
 ADMIN_EMERGENCIA_ID = ADMIN_EMERGENCIA.id
 
 RAIZ = Path(__file__).resolve().parent.parent
-ESTATICO = RAIZ / "app" / "static"
-HOME_HTML = ESTATICO / "home.html"
-LOGIN_HTML = ESTATICO / "login.html"
-ADMIN_HTML = ESTATICO / "admin.html"
-PAINEL_HTML = ESTATICO / "painel.html"
+# As telas moram na RAIZ do repo, e nao em app/static/, por causa do GitHub
+# Pages: um site de projeto e publicado de ".../<repo>/", entao ele so acha o
+# que esta na raiz. Deixar uma copia em app/static/ foi exatamente o que fez o
+# Pages continuar servindo o painel antigo duas vezes, entao agora a raiz e a
+# fonte unica e o Render le os mesmos arquivos.
+INDEX_HTML = RAIZ / "index.html"
+LOGIN_HTML = RAIZ / "login.html"
+ADMIN_HTML = RAIZ / "admin.html"
+PAINEL_HTML = RAIZ / "painel.html"
+STYLE_CSS = RAIZ / "style.css"
+AUTH_JS = RAIZ / "auth.js"
 MAX_CANAIS_POR_AGENTE = 5
 
 # Janela que o webhook generico espera o worker responder antes de devolver
@@ -701,10 +707,20 @@ from app import painel as painel_router  # noqa: E402
 
 app.include_router(painel_router.router)
 
-# Paginas e assets. Montado explicitamente porque as tres telas (index/admin/
-# painel) e seus .js/.css sao servidos daqui em vez do diretorio do projeto.
-if ESTATICO.is_dir():
-    app.mount("/static", StaticFiles(directory=ESTATICO), name="static")
+# Os assets sao servidos por rota, e nao por mount de diretorio. Montar a raiz
+# do repo inteiro publicaria .env, .git, os .py e o schema.sql; servir so os
+# dois arquivos que o site usa nao tem esse risco. As paginas HTML tambem vem
+# por rota, cada uma apontando para o arquivo da raiz.
+
+
+@app.get("/auth.js", include_in_schema=False)
+async def asset_auth_js():
+    return FileResponse(AUTH_JS, media_type="application/javascript")
+
+
+@app.get("/style.css", include_in_schema=False)
+async def asset_style_css():
+    return FileResponse(STYLE_CSS, media_type="text/css")
 
 # A pagina tambem pode ser hospedada no GitHub Pages, entao liberamos CORS
 # para que o navegador consiga chamar esta API de outra origem.
@@ -719,7 +735,8 @@ app.add_middleware(
 # do HTML; os dados exigem conta), o health check do Render, a config do front e
 # os webhooks, que tem segredo proprio na propria rota. TODO o resto exige
 # usuario logado.
-_ROTAS_PUBLICAS = ("/", "/login", "/health", "/admin", "/painel", "/api/config")
+_ROTAS_PUBLICAS = ("/", "/login", "/health", "/admin", "/painel", "/api/config",
+                   "/auth.js", "/style.css")
 _PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
 
 
@@ -737,6 +754,10 @@ async def exigir_login(request: Request, call_next):
     padrão agora é "fechado" — quem não tem sessão leva 401, sempre.
     """
     caminho = request.url.path
+    # Os assets sao publicos por definicao (o HTML ja os pede antes de haver
+    # sessao) e por serem arquivos estaticos de uma tela de login.
+    if caminho.endswith((".js", ".css", ".png", ".svg", ".ico")):
+        return await call_next(request)
     if _eh_publica(caminho) or request.method == "OPTIONS":
         return await call_next(request)
 
@@ -770,8 +791,13 @@ async def exigir_login(request: Request, call_next):
 @app.get("/", include_in_schema=False)
 async def index():
     """Home de venda, pública e sem login. Quem já tem sessão é redirecionado
-    para o painel pelo JS da própria página."""
-    return FileResponse(HOME_HTML)
+    para o painel pelo JS da própria página.
+
+    Também é o index.html da raiz, que é o que o GitHub Pages serve na raiz do
+    site de projeto — por isso a home é index.html e não home.html: sem esse
+    nome, ".../chatbotproject/" não teria índice de diretório.
+    """
+    return FileResponse(INDEX_HTML)
 
 
 @app.get("/login", include_in_schema=False)

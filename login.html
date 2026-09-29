@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chatbot Project Â· Seus chatbots, suas contas</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="style.css">
 <style>
   /* Layout da home. O style.css Ã© o do painel (grid com sidebar), entÃ£o a home
      precisa neutralizar esse grid e usar uma coluna central. */
@@ -67,7 +67,7 @@
   </div>
 </div>
 
-<script src="/static/auth.js"></script>
+<script src="auth.js"></script>
 <script>
 (async () => {
   const $ = (id) => document.getElementById(id);
@@ -76,7 +76,7 @@
   // JÃ¡ logado? Vai direto para a tela certa, sem passar pelo formulÃ¡rio.
   const eu = await Auth.obterSessao();
   if (eu) {
-    location.replace(eu.eh_admin ? "/admin" : "/painel");
+    location.replace(Auth.destino(eu));
     return;
   }
 
@@ -105,17 +105,17 @@
   $("abaCriar").onclick = () => trocar("criar");
   trocar("entrar");
 
+  // Auth.destino() sabe a diferenca entre servir no Render (/admin) e no
+  // GitHub Pages (/admin.html). Aqui so cuidamos do ?redir, que a pagina de
+  // destino gravou antes de mandar o usuario para cá.
   function destino(eu) {
     let alvo = null;
     try {
       alvo = sessionStorage.getItem("chatbotproject.redir");
       sessionStorage.removeItem("chatbotproject.redir");
     } catch (e) {}
-    // Um ?redir=/admin Ã© respeitado sÃ³ para admin: um cliente apontado para
-    // /admin seria levado ao painel dele pelo prÃ³prio painel, mas o redirect
-    // automÃ¡tico evita o ida-e-volta.
-    if (alvo && (alvo !== "/admin" || eu.eh_admin)) return alvo;
-    return eu.eh_admin ? "/admin" : "/painel";
+    if (alvo) return Auth.destino(eu, alvo);
+    return Auth.destino(eu);
   }
 
   $("form").onsubmit = async (ev) => {
