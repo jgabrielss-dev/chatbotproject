@@ -1752,6 +1752,39 @@ if tem_testclient:
                   "12" in r.text and "mensagens" in r.text)
         _desmontar_fakes()
 
+        # A cota acima é por conversa, e a conversa anônima é o campo `sessao`:
+        # trocar o valor a cada mensagem criava uma conversa nova a cada vez e a
+        # cota de 12 nunca acabava — cada uma das mensagens sendo uma chamada de
+        # IA de verdade. Este é o teste do furo: muitas mensagens, todas com
+        # `sessao` diferente, e mesmo assim o IP para no teto.
+        from app import limite_turnos as _ltm
+
+        _ltm.limpar()
+        _teto_antigo = main_mod.settings.limite_turno_anonimo_hora
+        object.__setattr__(main_mod.settings, "limite_turno_anonimo_hora", 3)
+        try:
+            fake = _montar_fakes()
+            with TestClient(main_mod.app) as c:
+                codigos = []
+                for i in range(5):
+                    r = c.post("/api/interno/produto",
+                               json={"sessao": f"token-falso-{i:04d}xx",
+                                     "texto": "oi"})
+                    codigos.append(r.status_code)
+                    _ultimo_texto = r.text
+                check("girar o token da sessao NAO zera a cota da home (item 14)",
+                      codigos[:3] == [200, 200, 200] and codigos[3:] == [429, 429],
+                      str(codigos))
+                check("o 429 oferece criar a conta em vez de so terminar",
+                      "conta" in _ultimo_texto.lower(), _ultimo_texto[:90])
+                check("a cota por conversa continua valendo antes do teto de IP",
+                      fake.quota == 0, str(fake.quota))
+            _desmontar_fakes()
+        finally:
+            object.__setattr__(main_mod.settings, "limite_turno_anonimo_hora",
+                               _teto_antigo)
+            _ltm.limpar()
+
         # Suporte pede conta: sem token o middleware fecha em 401 (item 13).
         _montar_fakes()
         with TestClient(main_mod.app) as c:
@@ -1764,6 +1797,231 @@ if tem_testclient:
         _desmontar_fakes()
         object.__setattr__(main_mod.settings, "supabase_url", _auth_old[0])
         object.__setattr__(main_mod.settings, "supabase_anon_key", _auth_old[1])
+
+# --- mudanca de assinatura so com confirmacao da pessoa (item 13) -------------
+# Quem decidia era o modelo: "sera que da pra cancelar depois?" e "cancele por
+# mim" chegam parecidas, e uma delas cancelando a assinatura de quem so estava
+# perguntando e o tipo de erro que o chat nao desfaz sozinho. A acao de
+# assinatura agora vem em dois tempos, e o segundo tempo e uma mensagem nova da
+# pessoa -- nao a boa vontade do modelo no mesmo turno.
+import json as _json_conf  # isort: skip
+
+_suporte = aint.get("suporte")
+
+
+def _fala(acao: dict) -> str:
+    return ("Vou olhar isso para voce.\n<<<ACAO>>>\n"
+            + _json_conf.dumps(acao, ensure_ascii=False) + "\n<<<FIM>>>")
+
+
+# O turno inteiro e rodado de verdade (mesmo laco de acao de producao), com o
+# modelo roteirizado e o `agendar_cancelamento` vigiado. Sem isso o teste
+# passaria mesmo com a regra fora do laco.
+_cancelamentos: list[str] = []
+_rc_orig = ci.rc.agendar_cancelamento
+
+
+async def _agendar_vigia(usuario_id, *_a, **_k):
+    _cancelamentos.append(usuario_id)
+    return {"cancela_em": "2026-12-01", "fim_periodo": "2026-11-30"}
+
+
+def _turno(respostas: list[str]) -> dict:
+    """Roda um turno do suporte com o modelo respondendo `respostas` na ordem."""
+    fila = list(respostas)
+
+    async def _responder_roteirizado(*_a, **_k):
+        return fila.pop(0) if fila else "Pronto, e mais alguma coisa?"
+
+    async def _memoria_igual2(_p, memoria, _t):
+        return memoria
+
+    async def _sem_anexo2(_c, anexos):
+        return [], []
+
+    class _RepoVigia:
+        async def obter_ou_criar_sessao(self, agente_id, canal_id, externo):
+            return {"id": 7, "memoria": None}
+
+        async def salvar_mensagem(self, *a, **k):
+            return None
+
+        async def historico_sessao(self, sessao_id):
+            return []
+
+        async def ultimos_trechos(self, *a, **k):
+            return []
+
+        async def atualizar_memoria(self, *a, **k):
+            return None
+
+    _guarda = ci.repo, ci.gemini.responder, ci.gemini.atualizar_memoria
+    _guarda_pipe = ci.pipeline.resolver_anexos
+    try:
+        ci.repo = _RepoVigia()
+        ci.gemini.responder = _responder_roteirizado
+        ci.gemini.atualizar_memoria = _memoria_igual2
+        ci.pipeline.resolver_anexos = _sem_anexo2
+        return asyncio.run(ci._falar(
+            _suporte, {"id": 11, "agente_id": 1}, "u-da-pessoa",
+            ci.Mensagem(sessao="u-da-pessoa", texto="quero cancelar"),
+            "u-da-pessoa"))
+    finally:
+        ci.repo, ci.gemini.responder, ci.gemini.atualizar_memoria = _guarda
+        ci.pipeline.resolver_anexos = _guarda_pipe
+
+
+try:
+    ci.rc.agendar_cancelamento = _agendar_vigia
+
+    # 1) "quero cancelar" -> o modelo pergunta. NADA foi agendado. O segundo
+    #    turno do laco e a pergunta, que e o que a pessoa le na tela.
+    r = _turno([_fala({"acao": "cancelar_plano"}),
+                ("Posso cancelar a sua assinatura? Vale a partir do fim do "
+                 "periodo que voce ja pagou.")])
+    check("cancelar sem confirmacao nao agenda nada", _cancelamentos == [],
+          str(_cancelamentos))
+    check("e a resposta da tela e a pergunta de volta", r["resposta"].startswith(
+        "Posso cancelar a sua assinatura?"), r["resposta"][:90])
+    check("e nenhuma acao foi mostrada como feita", r.get("acao") is None,
+          str(r.get("acao"))[:80])
+
+    # 2) O modelo se apressa e confirma sozinho no mesmo turno: continua fora.
+    _cancelamentos.clear()
+    _turno([_fala({"acao": "cancelar_plano"}),
+            _fala({"acao": "cancelar_plano", "confirmado": True})])
+    check("o modelo nao confirma por conta da pessoa no mesmo turno",
+          _cancelamentos == [], str(_cancelamentos))
+
+    # 3) Mensagem nova da pessoa dizendo que sim: agenda.
+    _cancelamentos.clear()
+    r = _turno([_fala({"acao": "cancelar_plano", "confirmado": True})])
+    check("com confirmacao da pessoa o cancelamento e agendado",
+          _cancelamentos == ["u-da-pessoa"], str(_cancelamentos))
+    check("e a acao executada volta para a tela",
+          (r.get("acao") or {}).get("nome") == "cancelar_plano", str(r.get("acao"))[:80])
+
+    # 4) A regra vale para as tres acoes de assinatura, e so para elas.
+    _assinatura = {a.nome for a in _suporte.acoes if a.confirma}
+    check("as tres acoes de assinatura exigem confirmacao",
+          _assinatura == {"mudar_plano", "cancelar_plano", "reativar_plano"},
+          str(sorted(_assinatura)))
+    check("ler a conta e ver os precos continuam sem confirmacao",
+          not {a.nome for a in _suporte.acoes if not a.valor} & _assinatura)
+
+    # 5) O prompt do suporte ensina o caminho em dois tempos.
+    _fonte = inspect.getsource(ci._executar)
+    check("o servidor cobra a confirmacao (nao so o prompt)",
+          'acao.confirma' in _fonte and 'confirmado' in _fonte)
+    check("e barra a auto-confirmacao no mesmo turno",
+          "aguardando_confirmacao" in _fonte)
+    check("o prompt do suporte avisa que a confirmacao e da pessoa",
+          "confirmado" in _suporte.prompt
+          and "pergunta" in _suporte.prompt.lower())
+finally:
+    ci.rc.agendar_cancelamento = _rc_orig
+
+# --- cota da home por IP: o `sessao` do anonimo e forjavel (item 14) ---------
+# A cota do item 14 e por conversa, e a chave da conversa anonima e o campo
+# `sessao`, que o navegador inventa. Sem esta segunda rede, trocar o valor a
+# cada mensagem dava cota nova a cada vez e o teste grátis da home virava
+# ilimitado -- com uma chamada de IA por mensagem, que e o que sai do bolso do
+# dono. Aqui o que se prova e que o teto e por PESSOA (IP) e nao por conversa.
+import app.limite_turnos as _lt
+
+
+class _Req:
+    """Request mínima: o módulo só olha o cabeçalho e o host do socket."""
+
+    def __init__(self, host="10.0.0.1", xff=None):
+        self.headers = {"x-forwarded-for": xff} if xff else {}
+        self.client = type("_Peer", (), {"host": host})()
+
+
+_lt_limpar = _lt.limpar
+try:
+    # Girar a "conversa" não gira a pessoa: e por isso que o teto pega o abuso
+    # que a cota por conversa deixa passar.
+    _respostas = [_lt.checa_turno_anonimo(_Req(), 3, 0) for _ in range(5)]
+    check("o mesmo IP bate no teto mesmo trocando de conversa",
+          _respostas == ["", "", "", "hora", "hora"], str(_respostas))
+
+    # Duas pessoas em IPs diferentes não se atrapalham: barrar quem só está na
+    # mesma rede de outra pessoa seria pior que o abuso que isto previne.
+    _lt_limpar()
+    for _ in range(3):
+        _lt.checa_turno_anonimo(_Req(host="10.0.0.1"), 3, 0)
+    check("outro IP comec limpo mesmo com o primeiro estourado",
+          _lt.checa_turno_anonimo(_Req(host="10.0.0.2"), 3, 0) == "")
+
+    # A janela do dia e a que segura o abuso lento (um turno por minuto durante a
+    # semana toda), e ela conta separada da hora.
+    _lt_limpar()
+    _dia = [_lt.checa_turno_anonimo(_Req(), 0, 2) for _ in range(4)]
+    check("o teto do dia vale mesmo com o da hora desligado",
+          _dia == ["", "", "dia", "dia"], str(_dia))
+
+    # 0 desliga: quem manda no numero e o dono, pelo ambiente.
+    check("teto 0 nao barra ninguem",
+          all(_lt.checa_turno_anonimo(_Req(), 0, 0) == "" for _ in range(50)))
+
+    # O IP vem do FIM do X-Forwarded-For: quem manda o cabecalho forjado so
+    # consegue se esconder no comeco da cadeia, que e o que e descartado.
+    check("o IP e o ultimo do X-Forwarded-For, nao o forjado da frente",
+          _lt.chave_do_ip(_Req(xff="1.1.1.1, 9.9.9.9, 200.100.50.10"))
+          == "200.100.50.10")
+    check("sem X-Forwarded-For cai no host do socket",
+          _lt.chave_do_ip(_Req(host="127.0.0.1")) == "127.0.0.1")
+    check("XFF so com lixo nao vira IP de barreira",
+          _lt.chave_do_ip(_Req(xff=" , , ")) == "10.0.0.1")
+
+    # Falha de contagem NAO pode derrubar a venda da home: libera.
+    _conta_orig = _lt._conta
+
+    def _conta_quebrada(*_a, **_k):
+        raise RuntimeError("contador quebrado")
+
+    _lt._conta = _conta_quebrada
+    try:
+        _lt_limpar()
+        check("erro no contador libera o chat em vez de derrubar a home",
+              _lt.checa_turno_anonimo(_Req(), 1, 1) == "")
+    finally:
+        _lt._conta = _conta_orig
+
+    # Janela vencida recomeca. Sem isto, um pico isolado deixaria o IP barrado
+    # para sempre depois que a janela virasse.
+    _lt_limpar()
+    _lt.checa_turno_anonimo(_Req(), 1, 0)
+    _mono_orig = _lt.time
+    _agora = _mono_orig.monotonic()
+
+    class _RelogioAdiantado:
+        """Duas horas à frente, sem mexer no `time` do processo inteiro."""
+
+        @staticmethod
+        def monotonic():
+            return _agora + 7200
+
+    _lt.time = _RelogioAdiantado
+    try:
+        check("passadas 2 horas o IP volta a passar",
+              _lt.checa_turno_anonimo(_Req(), 1, 0) == "")
+        _lt.checa_turno_anonimo(_Req(), 1, 0)
+        check("e volta a barrar no mesmo teto, na janela nova",
+              _lt.checa_turno_anonimo(_Req(), 1, 0) == "hora")
+    finally:
+        _lt.time = _mono_orig
+        _lt_limpar()
+
+    # O mapa nao cresce sem teto: varrao de IPs diferentes nao enche a memoria do
+    # processo, que e a memoria da venda.
+    for i in range(_lt._CHAVES_MAX + 50):
+        _lt.checa_turno_anonimo(_Req(host=f"10.1.{i // 256}.{i % 256}"), 10**6, 0)
+    check("o mapa de IPs nao cresce sem limite",
+          len(_lt._janelas) <= _lt._CHAVES_MAX, str(len(_lt._janelas)))
+finally:
+    _lt_limpar = _lt.limpar
 
 # --- item 8: o "digitando..." mora no chat.js e vale para todos os chats -----
 _chat_js = Path(ROOT / "chat.js").read_text(encoding="utf-8")

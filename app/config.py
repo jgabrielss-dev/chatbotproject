@@ -142,6 +142,16 @@ class Settings:
     inbox_backoff_teto_seg: int = int(os.getenv("INBOX_BACKOFF_TETO_SEG", "300"))
     inbox_lote: int = int(os.getenv("INBOX_LOTE", "8"))
 
+    # Teto de turnos do chat anônimo da home, por IP. A cota do item 14 é por
+    # conversa e a chave da conversa anônima é o campo `sessao`, que o
+    # navegador inventa — trocar o valor a cada mensagem zera a cota e cada
+    # turno é uma chamada de IA de verdade (ver app/limite_turnos.py). Estes
+    # números são a segunda rede e são altos de propósito: NAT de escritório
+    # compartilha IP, e barrar quem está na mesma empresa que outra pessoa seria
+    # pior que o abuso. 0 desliga o teto correspondente.
+    limite_turno_anonimo_hora: int = int(os.getenv("LIMITE_TURNO_ANONIMO_HORA", "120"))
+    limite_turno_anonimo_dia: int = int(os.getenv("LIMITE_TURNO_ANONIMO_DIA", "500"))
+
     @property
     def has_evolution(self) -> bool:
         return bool(self.evolution_api_url and self.evolution_api_key)

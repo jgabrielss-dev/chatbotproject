@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import agentes_internos as ai
-from app import cobranca, midia, pipeline
+from app import cobranca, limite_turnos, midia, pipeline
 from app import repos_cobranca as rc
 from app import repositories as repo
 from app.ai import gemini
@@ -350,17 +350,23 @@ class Recusa(Exception):
 
 
 async def _executar(agente: ai.AgenteInterno, usuario_id: str | None,
-                    pedido: dict) -> dict:
+                    pedido: dict, *, aguardando_confirmacao: str = "") -> dict:
     """Roda a ação pedida e devolve o que a tela precisa mostrar.
 
-    Três recusas, todas antes de tocar em qualquer conta:
+    Quatro recusas, todas antes de tocar em qualquer conta:
 
     1. Ação fora da lista do agente. `listar_planos` existe para o produto e
        para o suporte, mas um pedido de `mudar_plano` do agente da home é
        recusado: a lista é por agente, não global.
     2. Ação que mexe em dado de valor (`Acao.valor`) sem ninguém logado. É a
        única forma de o agente de suporte rodar sem dono de conta.
-    3. Corpo pedindo outra conta. Não existe campo para isso e `usuario_id` vem
+    3. Ação que muda a assinatura (`Acao.confirma`) sem a pessoa ter dito que
+       pode. E a segunda barreira é o `aguardando_confirmacao`: recusada uma
+       vez neste turno, a mesma ação não passa com `confirmado: true` ainda
+       neste turno — senão o modelo "confirmava" por conta da cliente, que é
+       exatamente o que a regra quer impedir. Só no turno seguinte (isto é,
+       depois que a pessoa escreveu algo) é que passa.
+    4. Corpo pedindo outra conta. Não existe campo para isso e `usuario_id` vem
        do token, nunca do corpo — mas a checagem existe para o dia em que
        alguém acrescentar um.
 
@@ -376,6 +382,17 @@ async def _executar(agente: ai.AgenteInterno, usuario_id: str | None,
                      f"o que existe e: {disponiveis}")
     if acao.valor and not usuario_id:
         raise Recusa("esta acao precisa de uma conta com login")
+    if acao.confirma:
+        if not pedido.get("confirmado"):
+            raise Recusa(
+                f"{nome} mexe na assinatura e a pessoa ainda nao confirmou: "
+                "pergunte se ela quer mesmo isso e espere a resposta")
+        if aguardando_confirmacao == nome:
+            raise Recusa(
+                f"a pessoa nao respondeu nada desde que voce perguntou sobre a "
+                f"{nome}; voce nao pode confirmar por ela. Escreva a pergunta e "
+                "so chame de novo (com confirmado: true) depois que ela "
+                "responder em outra mensagem")
     if pedido.get("usuario") and str(pedido["usuario"]) != str(usuario_id):
         raise Recusa("nao mexo na conta de outra pessoa; so falo da sua, que e "
                      "a que esta logada agora")
@@ -423,17 +440,26 @@ async def _falar(agente: ai.AgenteInterno, canal: dict, externo: str,
 
     acao_tela: dict | None = None
     texto = ""
+    # Ação de assinatura recusada por falta de confirmação NESTE turno. Zera a
+    # cada requisição: uma mensagem nova da pessoa é a confirmação que faltava.
+    aguardando_confirmacao = ""
     for _ in range(MAX_TURNOS_ACAO):
         bruto = await gemini.responder(agente.prompt, historico, pergunta,
                                        memoria, baixados)
         texto, pedido = tirar_acao(bruto)
         if pedido is None:
             break
+        nome_acao = str(pedido.get("acao") or "").strip()
+        _acao = agente.acao(nome_acao)
         try:
-            acao_tela = await _executar(agente, usuario_id, pedido)
+            acao_tela = await _executar(
+                agente, usuario_id, pedido,
+                aguardando_confirmacao=aguardando_confirmacao)
             pergunta = resultado_como_texto({"ok": True, "dados": acao_tela})
         except Recusa as recusa:
             acao_tela = None
+            if _acao is not None and _acao.confirma:
+                aguardando_confirmacao = nome_acao
             pergunta = resultado_como_texto({"ok": False, "motivo": str(recusa)})
         # O histórico local cresce com o par pergunta/resposta, para o modelo
         # enxergar o que ele mesmo pediu. `baixados` zera: os bytes já foram
@@ -508,6 +534,33 @@ async def conversar(chave: str, corpo: Mensagem, request: Request):
 
     usuario = getattr(request.state, "usuario", None)
     await _exigir_plano(agente, usuario)
+
+    # Segunda rede do item 14, e ela vem antes da cota por conversa porque é a
+    # que pega o abuso: quem troca o campo `sessao` a cada mensagem nunca chega
+    # a 12 numa conversa só, e cada uma das mensagens é uma chamada de IA nossa.
+    # Só o anônimo entra — quem está logado tem consumo medido no mês e plano de
+    # verdade, e trancar essa pessoa por causa de um contador em memória seria
+    # cobrar duas vezes pelo mesmo motivo.
+    if usuario is None:
+        estourou = limite_turnos.checa_turno_anonimo(
+            request, settings.limite_turno_anonimo_hora,
+            settings.limite_turno_anonimo_dia)
+        if estourou == "hora":
+            raise HTTPException(
+                429,
+                "Você mandou mensagens neste atendente rápido demais. "
+                "Experimente de novo em uma hora — ou crie a conta, que é "
+                "grátis e abre o painel inteiro.",
+                headers={"Retry-After": "3600"},
+            )
+        if estourou == "dia":
+            raise HTTPException(
+                429,
+                "Você usou muitas mensagens do atendente de teste hoje. Volte "
+                "amanhã, ou crie a conta (grátis, sem cartão): o painel abre "
+                "na hora e os limites são bem maiores.",
+                headers={"Retry-After": "86400"},
+            )
 
     # Item 14: o agente da home não pode ser usado para sempre. A cota é por
     # conversa anônima e é conferida ANTES de chamar o modelo, para o limite não

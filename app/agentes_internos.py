@@ -56,6 +56,18 @@ class Acao:
     #: proposital: se existisse, "troque o plano da conta X" seria um pedido
     #: válido e o agente de viraria painel do admin.
     valor: bool = False
+    #: Ação que muda a assinatura (troca, cancelamento, reativação) só roda
+    #: depois que a pessoa responder "pode fazer" num turno ANTERIOR.
+    #:
+    #: Quem decide é o modelo, e modelo interpreta: "será que dá pra cancelar
+    #: depois?", "quero ver quanto fica se eu mudar" e "cancele por mim" são
+    #: frases parecidas, e uma delas cancelando a assinatura de alguém que só
+    #: estava perguntando é o tipo de erro que o chat não desfaz sozinho. Com
+    #: `confirma`, o servidor recusa a primeira chamada, o agente pergunta, e
+    #: só a chamada seguinte (que carrega `confirmado: true`) executa — o mesmo
+    #: caminho que uma pessoa leva no balão, sem depender da boa vontade do
+    #: modelo.
+    confirma: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -338,6 +350,22 @@ sua frente:
   mudou.
 - `cancelar_plano`: agenda o cancelamento para o fim do período pago.
 - `reativar_plano`: desmarca um cancelamento agendado.
+
+## Estas três aguentam confirmação, e ela é da pessoa, não sua
+
+`mudar_plano`, `cancelar_plano` e `reativar_plano` mudam a assinatura. O
+servidor só deixa rodar depois que a pessoa disser que pode, em outra mensagem.
+Então o caminho é sempre em dois tempos:
+
+1. A pessoa pede (ou parece pedir). Você **pergunta** — "posso cancelar? isso
+   vale a partir de tal data" — e não chama a ação.
+2. A pessoa responde que sim. Aí você chama a ação com `"confirmado": true`.
+
+Se você pular o passo 1, o servidor recusa e a pessoa lê isso na tela. E se
+você chamar de novo com `confirmado: true` sem a pessoa ter respondido nada
+desde a sua pergunta, ele recusa também: confirmar por ela seria decidir a
+conta dela no lugar dela. Na dúvida, pergunte — perguntar é sempre mais barato
+do que errar.
 - `falar_com_time`: devolve o e-mail de atendimento. Use para desconto, nota
   fiscal, contrato e qualquer coisa fora do seu alcance.
 
@@ -350,12 +378,13 @@ sua frente:
         Acao("mudar_plano", "Trocar plano",
              "Agenda a troca para o fim do período pago; em upgrade abre a "
              "cobrança do valor.",
-             campos=("plano", "ciclo"), valor=True),
+             campos=("plano", "ciclo"), valor=True, confirma=True),
         Acao("cancelar_plano", "Cancelar assinatura",
              "Agenda o cancelamento para o fim do período já pago.",
-             valor=True),
+             valor=True, confirma=True),
         Acao("reativar_plano", "Reativar assinatura",
-             "Desmarca um cancelamento que estava agendado.", valor=True),
+             "Desmarca um cancelamento que estava agendado.",
+             valor=True, confirma=True),
         Acao("falar_com_time", "Falar com a equipe",
              "Devolve o e-mail de atendimento da plataforma."),
     ),
