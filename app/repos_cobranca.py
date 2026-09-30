@@ -88,6 +88,18 @@ async def contar_planos() -> int:
 
 
 def _serializar(row: Any) -> dict:
+    """Dicionário da linha, ou `{}` se o `UPDATE` não pegou nada.
+
+    Todo `UPDATE ... RETURNING` aqui devolve vazio para quem ainda não tem
+    assinatura — e conta nova não tem: o gatilho de cadastro cria o *perfil*,
+    não a assinatura. Antes disto, `dict(None)` estourava `TypeError` no meio de
+    um "cancelar"/"reativar" e a pessoa recebia `'NoneType' object is not
+    iterable` de um botão que deveria dizer "esta conta não tem assinatura
+    paga". `{}` deixa a decisão para quem chamou, que sabe dizer isso em
+    português.
+    """
+    if row is None:
+        return {}
     d = dict(row)
     for chave in ("inicio_periodo", "fim_periodo", "plano_proximo", "ciclo_proximo",
                   "cancela_em", "criado_em", "atualizado_em", "pago_em",

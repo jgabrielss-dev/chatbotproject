@@ -157,6 +157,11 @@ async def cancelar_assinatura(request: Request):
         raise HTTPException(400, "Esta conta não tem assinatura paga.")
     if limites.sem_cota():
         raise HTTPException(503, "Cobrança indisponível: sem banco de dados configurado.")
+    # Sem assinatura não há o que cancelar, e o `UPDATE` abaixo não pegaria
+    # nenhuma linha. Dizer 400 é honesto; devolver 200 depois de um
+    # cancelamento que não aconteceu faria a tela mentir para a pessoa.
+    if await rc.obter_assinatura(usuario.id) is None:
+        raise HTTPException(400, "Esta conta não tem assinatura paga.")
     await rc.agendar_cancelamento(usuario.id)
     limites.limpar_cache(usuario.id)
     return await limites.contexto(usuario.id)
@@ -171,6 +176,11 @@ async def reativar(request: Request):
         raise HTTPException(400, "Esta conta não tem assinatura paga.")
     if limites.sem_cota():
         raise HTTPException(503, "Cobrança indisponível: sem banco de dados configurado.")
+    assinatura = await rc.obter_assinatura(usuario.id)
+    if assinatura is None or not assinatura.get("cancela_em"):
+        # Desfazer o que não existe é a mesma mentira do outro lado: a tela
+        # mostraria "reativado" sem nunca ter estado cancelada.
+        raise HTTPException(400, "Não há cancelamento agendado nesta conta.")
     await rc.reverter_cancelamento(usuario.id)
     limites.limpar_cache(usuario.id)
     return await limites.contexto(usuario.id)

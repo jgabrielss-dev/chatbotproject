@@ -1918,6 +1918,46 @@ try:
     check("o prompt do suporte avisa que a confirmacao e da pessoa",
           "confirmado" in _suporte.prompt
           and "pergunta" in _suporte.prompt.lower())
+
+    # 6) Cancelar/reativar sem assinatura nao vira "feito" na tela. O `UPDATE`
+    #    nao pega linha nenhuma quando a conta ainda nao tem assinatura (o
+    #    cadastro cria o perfil, nao a assinatura) e o `dict(None` estourava
+    #    TypeError, que chegava na tela como "'NoneType' object is not
+    #    iterable" no meio de um cancelamento.
+    async def _agendar_vazio(_u, *_a, **_k):
+        return {}
+
+    async def _reverter_vazio(_u, *_a, **_k):
+        return {}
+
+    async def _reverter_sem_cancelamento(_u, *_a, **_k):
+        return {"id": 1, "cancela_em": None, "fim_periodo": None}
+
+    _reverter_orig = ci.rc.reverter_cancelamento
+    try:
+        ci.rc.agendar_cancelamento = _agendar_vazio
+        ci.rc.reverter_cancelamento = _reverter_vazio
+        r = asyncio.run(ci._acao_cancelar_plano("u-da-pessoa", {}))
+        check("cancelar sem assinatura devolve erro, nao um cancelamento",
+              "erro" in r, str(r)[:90])
+        r = asyncio.run(ci._acao_reativar_plano("u-da-pessoa", {}))
+        check("reativar sem assinatura devolve erro",
+              "erro" in r, str(r)[:90])
+
+        # E no turno inteiro: recusado, o modelo recebe o motivo e a tela nao
+        # mostra nenhum cartao de acao executada.
+        r = _turno([_fala({"acao": "cancelar_plano", "confirmado": True}),
+                    "Voce esta no teste, que nao tem assinatura para cancelar."])
+        check("o turno sem assinatura nao mostra acao executada",
+              r.get("acao") is None, str(r.get("acao"))[:80])
+
+        ci.rc.reverter_cancelamento = _reverter_sem_cancelamento
+        r = asyncio.run(ci._acao_reativar_plano("u-da-pessoa", {}))
+        check("reativar sem cancelamento agendado devolve erro",
+              "erro" in r and "agendado" in r["erro"], str(r)[:90])
+    finally:
+        ci.rc.agendar_cancelamento = _rc_orig
+        ci.rc.reverter_cancelamento = _reverter_orig
 finally:
     ci.rc.agendar_cancelamento = _rc_orig
 
@@ -2838,6 +2878,81 @@ for _m, _f in zip(_pools, _gp):
     _m.get_pool = _f
 check("reativar tambem recusa conta sem assinatura (admin/emergencia)",
       "eh_admin" in inspect.getsource(rotas_mod.reativar))
+
+# --- cancelar/reativar quando a conta ainda nao tem assinatura --------------
+# O gatilho de cadastro cria o PERFIL, nao a assinatura. Entao a conta nova que
+# aperta "cancelar" antes de abrir o painel chega aqui com `UPDATE ... RETURNING`
+# pegando zero linha: antes disso era `dict(None)` -> TypeError -> 500, e no chat
+# a recusa chegava como "'NoneType' object is not iterable".
+#
+# O pool falso (fetchrow devolvendo None) e reaplicado aqui em vez de confiar no
+# de cima: sem ele estas chamadas iam para o banco de verdade e o `asyncio.run`
+# seguinte estouraria com "another operation is in progress", do pool real.
+check("serializar linha vazia e {} e nao TypeError",
+       _rc_mod._serializar(None) == {})
+_rc_get_pool_orig = _rc_mod.get_pool
+_rc_mod.get_pool = _pool_vigia
+_SEM_ASSINATURA = "00000000-0000-4000-8000-000000000000"
+try:
+    for _nome, _args in (("agendar_cancelamento", (_SEM_ASSINATURA,)),
+                         ("reverter_cancelamento", (_SEM_ASSINATURA,)),
+                         ("agendar_troca", (_SEM_ASSINATURA, cob.PLANO_PRO, "mensal")),
+                         ("cancelar_troca", (_SEM_ASSINATURA,))):
+        _f = getattr(_rc_mod, _nome)
+        try:
+            _vazio = asyncio.run(_f(*_args))
+            check(f"{_nome} sem assinatura devolve {{}} em vez de estourar",
+                  _vazio == {}, str(_vazio)[:60])
+        except Exception as _e:  # noqa: BLE001
+            check(f"{_nome} sem assinatura devolve {{}} em vez de estourar",
+                  False, f"{type(_e).__name__}: {_e}")
+finally:
+    _rc_mod.get_pool = _rc_get_pool_orig
+
+_u2 = auth_mod.Usuario(id=_SEM_ASSINATURA,
+                       email="sem-assinatura@x", role=auth_mod.ROLE_USUARIO)
+_obter_orig, _ag_orig, _re_orig = (_rc_mod.obter_assinatura,
+                                   _rc_mod.agendar_cancelamento,
+                                   _rc_mod.reverter_cancelamento)
+_chamadas: list[str] = []
+
+
+async def _obter_nada(_uid):
+    return None
+
+
+async def _agendar_vigia_rota(uid, *_a, **_k):
+    _chamadas.append(f"cancelar:{uid}")
+    return {}
+
+
+async def _reverter_vigia_rota(uid, *_a, **_k):
+    _chamadas.append(f"reativar:{uid}")
+    return {}
+
+
+_rc_mod.obter_assinatura = _obter_nada
+_rc_mod.agendar_cancelamento = _agendar_vigia_rota
+_rc_mod.reverter_cancelamento = _reverter_vigia_rota
+_rc_mod.get_pool = _pool_vigia
+try:
+    for _nome, _rota in (("cancelar", rotas_mod.cancelar_assinatura),
+                         ("reativar", rotas_mod.reativar)):
+        _chamadas.clear()
+        try:
+            asyncio.run(_rota(_ReqVigia(_u2)))
+            check(f"/api/plano/{_nome} sem assinatura -> 400 e nao 500",
+                  False, "devolveu 200")
+        except _HTTPException as _e:
+            check(f"/api/plano/{_nome} sem assinatura -> 400 e nao 500",
+                  _e.status_code == 400, f"HTTP {_e.status_code}: {str(_e.detail)[:60]}")
+        check(f"/api/plano/{_nome} nem chega a marcar a assinatura",
+              not _chamadas, str(_chamadas))
+finally:
+    _rc_mod.obter_assinatura = _obter_orig
+    _rc_mod.agendar_cancelamento = _ag_orig
+    _rc_mod.reverter_cancelamento = _re_orig
+    _rc_mod.get_pool = _rc_get_pool_orig
 
 print("\n== correções: webhooks e SSRF ==")
 import app.pipeline as _pl_mod  # noqa: E402

@@ -308,6 +308,14 @@ async def _acao_mudar_plano(usuario_id: str, dados: dict) -> dict:
 
 async def _acao_cancelar_plano(usuario_id: str, _dados: dict) -> dict:
     a = await rc.agendar_cancelamento(usuario_id)
+    if not a:
+        # Não existe assinatura para marcar: a conta nova que cancela antes de
+        # abrir o painel é a forma mais curta de chegar aqui. Devolver um cartão
+        # de "Cancelar assinatura" sem nada agendado é o pior jeito de mentir,
+        # e é o que a regra "não prometa o que você não fez" proíbe.
+        return {"erro": "esta conta nao tem assinatura paga para cancelar. "
+                        "diga isso a pessoa e ofereca o plano, sem confirmar "
+                        "um cancelamento que nao aconteceu"}
     return {"cancela_em": _data_br(a.get("cancela_em")),
             "fim_periodo": _data_br(a.get("fim_periodo")),
             "observacao": "Cancelar nao apaga agentes, canais nem conversas."}
@@ -315,7 +323,12 @@ async def _acao_cancelar_plano(usuario_id: str, _dados: dict) -> dict:
 
 async def _acao_reativar_plano(usuario_id: str, _dados: dict) -> dict:
     a = await rc.reverter_cancelamento(usuario_id)
-    return {"cancela_em": a.get("cancela_em"),
+    if not a:
+        return {"erro": "esta conta nao tem assinatura, entao nao ha "
+                        "cancelamento agendado para desfazer"}
+    if not a.get("cancela_em"):
+        return {"erro": "esta conta nao tem cancelamento agendado"}
+    return {"cancela_em": _data_br(a.get("cancela_em")),
             "fim_periodo": _data_br(a.get("fim_periodo")),
             "observacao": "Cancelamento agendado desfeito."}
 
