@@ -14,7 +14,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from app import repositories as repo
 from app.auth import (
@@ -109,39 +108,36 @@ async def _exigir_identificador_unico(
     phone_number_id / ig_user_id. Com o mesmo id em dois canais, o roteamento
     fica ambíguo e a assinatura X-Hub-Signature-256 é conferida contra o
     app_secret do canal errado — todas as mensagens seriam rejeitadas.
+
+    A mensagem de recusa não diz qual canal está com o valor: a unicidade é
+    entre contas diferentes, e o nome do canal alheio não é informação do
+    usuário que está criando o dele.
     """
     if tipo not in TIPOS_CANAL_OFICIAL:
         return
     campo = "ig_user_id" if tipo == "instagram_oficial" else "phone_number_id"
     identificador = str(config.get(campo) or "").strip()
-    if not identificador:
-        return
-
-    for canal in await repo.listar_canais():
-        if canal["id"] == ignorar_canal_id or canal["tipo"] != tipo:
-            continue
-        if str((canal.get("config") or {}).get(campo) or "").strip() == identificador:
-            raise HTTPException(
-                409,
-                f"Este {campo} ({identificador}) já está em uso pelo canal "
-                f"\"{canal['nome']}\". Cada conta da Meta deve ter um único canal, "
-                "senão o webhook não consegue decidir para quem é a mensagem.",
-            )
+    if identificador and await repo.canal_usa_identificador(
+        tipo, campo, identificador, ignorar_canal_id=ignorar_canal_id
+    ):
+        raise HTTPException(
+            409,
+            f"Este {campo} ({identificador}) já está em uso por outro canal. "
+            "Cada conta da Meta deve ter um único canal, senão o webhook não "
+            "consegue decidir para quem é a mensagem.",
+        )
 
     # O verify_token precisa ser único entre canais, porque é por ele que o
     # handshake de verificação (GET) acha o canal — o Meta não manda o id ainda.
     token = str(config.get("verify_token") or "").strip()
-    if token:
-        for canal in await repo.listar_canais():
-            if canal["id"] == ignorar_canal_id:
-                continue
-            if canal["tipo"] in TIPOS_CANAL_OFICIAL and \
-                    str((canal.get("config") or {}).get("verify_token") or "").strip() == token:
-                raise HTTPException(
-                    409,
-                    f"Este verify_token já é usado pelo canal \"{canal['nome']}\". "
-                    "Use um valor diferente em cada canal oficial.",
-                )
+    if token and await repo.canal_usa_identificador(
+        None, "verify_token", token, ignorar_canal_id=ignorar_canal_id
+    ):
+        raise HTTPException(
+            409,
+            "Este verify_token já é usado por outro canal. Use um valor "
+            "diferente em cada canal oficial.",
+        )
 
 
 def _url_webhook_meta(tipo: str) -> str:
@@ -1696,11 +1692,26 @@ async def admin_listar_contas(request: Request):
     return await repo.listar_perfis()
 
 
+def _conta_ou_404(conta_id: str) -> str:
+    """`perfis.id` é uuid, então um id fora do formato não é conta nenhuma.
+
+    Sem esta checagem o Postgres respondia 500 ("invalid input syntax for type
+    uuid") para qualquer id besta na URL. 404 é a resposta certa — e não entrega
+    nada sobre o que existe.
+    """
+    try:
+        uuid.UUID(conta_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(404, "Conta não encontrada.")
+    return conta_id
+
+
 @app.get("/api/admin/contas/{conta_id}")
 async def admin_detalhe_conta(conta_id: str, request: Request):
     """Uma conta e os agentes dela. O admin precisa disso para conferir a
     separação sem precisar sair do painel."""
     exigir_admin(usuario_atual(request))
+    conta_id = _conta_ou_404(conta_id)
     perfil = await repo.obter_perfil(conta_id)
     if not perfil:
         raise HTTPException(404, "Conta não encontrada.")
@@ -1714,6 +1725,7 @@ async def admin_detalhe_conta(conta_id: str, request: Request):
 async def admin_atualizar_conta(conta_id: str, request: Request):
     """Promove/rebaixa e/ou bloqueia uma conta."""
     admin = exigir_admin(usuario_atual(request))
+    conta_id = _conta_ou_404(conta_id)
     body = await request.json()
     role = (body.get("role") or "usuario").strip()
     if role not in ("admin", "usuario"):

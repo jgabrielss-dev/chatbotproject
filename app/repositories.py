@@ -468,6 +468,49 @@ async def listar_canais(agente_id: int | None = None, *, redigir: bool = False) 
     return [(_serialize_canal_publico if redigir else _serialize_canal)(r) for r in rows]
 
 
+# Chaves de `canais.config` pelas quais a Meta roteia o webhook. Lista fechada
+# porque o campo entra no SQL como chave do `->>`: um valor vindo de fora não
+# pode virar texto de consulta.
+CAMPOS_ROTEAMENTO_META = ("phone_number_id", "ig_user_id", "verify_token")
+
+
+async def canal_usa_identificador(
+    tipo: str | None,
+    campo: str,
+    valor: str,
+    *,
+    ignorar_canal_id: int | None = None,
+) -> bool:
+    """Algum canal já usa esse identificador? Só um sim/não, sem nome nem config.
+
+    A unicidade é global de propósito: o webhook oficial chega sem segredo na
+    URL e é resolvido pelo phone_number_id / ig_user_id do evento, então o valor
+    precisa pertencer a um canal só. Antes essa checagem era feita percorrendo
+    `listar_canais()` e a mensagem de 409 citava o nome do canal em conflito --
+    o processo inteiro, e o usuário, ficavam sabendo o nome que outro cliente
+    deu ao canal dele. O EXISTS não devolve nada além do booleano.
+
+    `tipo=None` significa "qualquer canal oficial" (usado no verify_token, que
+    é único entre os dois tipos, porque o handshake da Meta não manda o id da
+    conta).
+    """
+    if campo not in CAMPOS_ROTEAMENTO_META:
+        raise ValueError(f"chave de identificador fora da lista: {campo!r}")
+    if not valor:
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        achou = await con.fetchval(
+            """SELECT EXISTS (
+                   SELECT 1 FROM canais
+                   WHERE ($1::text IS NULL OR tipo = $1::text)
+                     AND ($2::int IS NULL OR id <> $2::int)
+                     AND btrim(coalesce(config ->> $3, '')) = $4)""",
+            tipo, ignorar_canal_id, campo, valor,
+        )
+    return bool(achou)
+
+
 async def obter_canal(canal_id: int, *, redigir: bool = False) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as con:
@@ -908,17 +951,19 @@ async def resumo_caixa(limite: int = 10, dono_id: str | None = None) -> dict:
     para qualquer usuário logado seria vazar dado de terceiros — daí o filtro
     ser obrigatório para todo mundo que não seja admin.
     """
-    # O join é sempre necessário: é ele que liga a fila ao dono. Sem dono
-    # (admin) o filtro fica vazio e o join não restringe nada — o agente é
-    # removido em cascata junto com o canal, então o inner join não oculta fila.
-    #
-    # A caminho da fila é `caixa_entrada.canal_id` -> `canais.id` ->
+    # O caminho da fila é `caixa_entrada.canal_id` -> `canais.id` ->
     # `canais.agente_id` -> `agentes.id`. Casar `a.id` direto com `c.canal_id`
     # (o que estava aqui) compara um id de canal com um id de agente: os dois
     # são sequenciais e independentes, então o filtro deixava passar a fila de
     # um cliente para o dono do agente de MESMO número — o `texto` e o
     # `remetente` de conversa de terceiro na tela de quem pagou.
-    join_dono = " JOIN canais k ON k.id = c.canal_id JOIN agentes a ON a.id = k.agente_id"
+    #
+    # O `k` (canais) NÃO entra aqui: as consultas que usam `_COLS_CAIXA` já o
+    # trazem pelo `_JOIN_CAIXA`, e repetir `JOIN canais k` fazia o Postgres
+    # recusar com "table name k specified more than once" — ou seja, a fila do
+    # painel (/api/caixa e /api/painel/resumo) devolvia 500 para todo mundo.
+    join_dono = " JOIN agentes a ON a.id = k.agente_id"
+    from_dono = "FROM caixa_entrada c JOIN canais k ON k.id = c.canal_id" + join_dono
     filtro_dono = ""
     params_extra: list[Any] = []
     if dono_id is not None:
@@ -932,7 +977,7 @@ async def resumo_caixa(limite: int = 10, dono_id: str | None = None) -> dict:
     async with pool.acquire() as con:
         counts_rows = await con.fetch(
             f"""SELECT c.status, count(*) AS total
-                FROM caixa_entrada c{join_dono}
+                {from_dono}
                 WHERE 1 = 1{filtro_dono}
                 GROUP BY c.status""",
             *params_extra,

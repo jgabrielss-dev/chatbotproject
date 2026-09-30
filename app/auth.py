@@ -87,6 +87,21 @@ class Usuario:
 ADMIN_EMERGENCIA = Usuario(id="admin-token", email="admin@local", role=ROLE_ADMIN)
 
 
+def id_para_coluna_uuid(usuario: Usuario) -> str | None:
+    """`usuario.id` quando ele serve para uma coluna uuid; `None` na emergência.
+
+    A conta do `ADMIN_TOKEN` é um sentinela: não tem linha em `auth.users` e o
+    id NÃO é um uuid, de propósito — nada pode gravá-lo em coluna com FK. O
+    lado disso é que usá-lo como `dono_id` faz o Postgres devolver 500
+    ("invalid input syntax for type uuid"), e essa entrada existe justamente
+    para o operador destrancar a plataforma quando ela está com problema.
+
+    `None` é a resposta certa nessas leituras: não existe conta para filtrar, e
+    é exatamente o que um admin de verdade recebe em `_dono()`.
+    """
+    return None if usuario.id == ADMIN_EMERGENCIA.id else usuario.id
+
+
 def limpar_cache(usuario_id: str | None = None) -> None:
     """Usado pelos testes e depois de mudar o papel/bloqueio de alguém.
 

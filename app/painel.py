@@ -17,7 +17,13 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app import repositories as repo
 from app import tipos_canal
-from app.auth import exigir_admin, exigir_token_aal2, limpar_cache, usuario_atual
+from app.auth import (
+    exigir_admin,
+    exigir_token_aal2,
+    id_para_coluna_uuid,
+    limpar_cache,
+    usuario_atual,
+)
 
 log = logging.getLogger("painel")
 
@@ -131,7 +137,9 @@ async def perfil(request: Request):
     adianta fetchar de novo.
     """
     usuario = usuario_atual(request)
-    linha = await repo.obter_perfil(usuario.id) or {}
+    # `id_para_coluna_uuid`: a conta de emergência (ADMIN_TOKEN) não tem linha em
+    # `perfis` e seu id não é uuid — consultar por ele dava 500 na tela de conta.
+    linha = await repo.obter_perfil(id_para_coluna_uuid(usuario)) or {}
     return {
         "id": usuario.id,
         "nome": linha.get("nome") or "",
@@ -209,7 +217,8 @@ async def ler_config_operacao(request: Request):
     """
     usuario = usuario_atual(request)
     exigir_admin(usuario)
-    linha = await repo.obter_perfil(usuario.id) or {}
+    # Mesma razão do `/perfil`: a conta de emergência não tem linha em `perfis`.
+    linha = await repo.obter_perfil(id_para_coluna_uuid(usuario)) or {}
     suporte = await repo.ler_config("email_atendimento")
     return {
         "nome": linha.get("nome") or "",

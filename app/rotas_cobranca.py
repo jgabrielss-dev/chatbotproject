@@ -28,7 +28,7 @@ from app import cobranca
 from app import limites
 from app import mercadopago as mp
 from app import repos_cobranca as rc
-from app.auth import exigir_nao_bloqueado, usuario_atual
+from app.auth import exigir_nao_bloqueado, id_para_coluna_uuid, usuario_atual
 from app.config import settings
 
 log = logging.getLogger("rotas_cobranca")
@@ -76,7 +76,10 @@ async def meus_pagamentos(request: Request):
     usuario = usuario_atual(request)
     if limites.sem_cota():
         return []
-    return await rc.listar_pagamentos(usuario.id)
+    # A conta de emergência (ADMIN_TOKEN) não tem id de uuid: passá-lo como
+    # `usuario_id` fazia o Postgres recusar e a rota devolvia 500 — justamente na
+    # tela que o operador abre quando algo está quebrado.
+    return await rc.listar_pagamentos(id_para_coluna_uuid(usuario))
 
 
 @router.post("/api/plano/troca")
@@ -164,6 +167,8 @@ async def reativar(request: Request):
     """Cancela o cancelamento agendado."""
     usuario = usuario_atual(request)
     exigir_nao_bloqueado(usuario)
+    if usuario.eh_admin or _isento(usuario):
+        raise HTTPException(400, "Esta conta não tem assinatura paga.")
     if limites.sem_cota():
         raise HTTPException(503, "Cobrança indisponível: sem banco de dados configurado.")
     await rc.reverter_cancelamento(usuario.id)

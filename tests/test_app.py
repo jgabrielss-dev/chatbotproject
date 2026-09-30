@@ -2318,13 +2318,90 @@ print("\n== correções: isolamento entre contas ==")
 # para o dono do agente de MESMO numero, com texto e remetente da conversa.
 _fonte_resumo = inspect.getsource(repo.resumo_caixa)
 check("a fila entra pelo caminho canal -> agente (nao por id igual)",
-      "JOIN canais k ON k.id = c.canal_id JOIN agentes a ON a.id = k.agente_id"
-      in _fonte_resumo and "ON a.id = c.canal_id" not in _fonte_resumo)
+      "JOIN agentes a ON a.id = k.agente_id" in _fonte_resumo
+      and "ON a.id = c.canal_id" not in _fonte_resumo)
 check("as estatisticas da home usam o mesmo caminho",
       "JOIN canais k ON k.id = c.canal_id" in inspect.getsource(repo.estatisticas_do_dono))
 check("a RLS da fila usa o caminho certo tambem",
       "c.id = caixa_entrada.canal_id"
       in (ROOT / "sql" / "schema.sql").read_text(encoding="utf-8"))
+
+# O filtro por dono precisa da ponte com o agente, mas o `canais k` ja vem do
+# _JOIN_CAIXA: repetir o alias faz o Postgres recusar a query inteira e a fila
+# do painel responde 500 (foi o que aconteceu em producao).
+_JOIN_SEM_ALIAS_DUPLO = re.compile(
+    r"\b(?:FROM|JOIN)\s+([a-z_][a-z_0-9]*)\s*(?:AS\s+)?([a-z_][a-z_0-9]*)",
+    re.IGNORECASE,
+)
+_NAO_ALIAS = {
+    "on", "where", "left", "right", "inner", "outer", "cross", "full", "join",
+    "limit", "order", "group", "and", "or", "select", "set", "values", "as",
+    "lateral", "natural", "using", "having", "union",
+}
+_sql_registrado: list[tuple[str, tuple]] = []
+
+
+class _ConFalsa:
+    async def fetch(self, sql, *args):
+        _sql_registrado.append((sql, args))
+        return []
+
+    async def fetchrow(self, sql, *args):
+        _sql_registrado.append((sql, args))
+        # `estatisticas_do_dono` faz dict(row) no fim; um dict vazio serve.
+        return {k: 0 for k in ("agentes", "canais", "sessoes", "mensagens",
+                               "fila_pendente", "mensagens_7d", "respostas_7d")}
+
+
+class _PoolFalso:
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return _ConFalsa()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+_pool_original = repo.get_pool
+
+
+async def _pool_falso():
+    return _PoolFalso()
+
+
+repo.get_pool = _pool_falso
+for _dono, _rotulo in ((None, "admin (sem filtro)"),
+                       ("8e80492f-1111-2222-3333-444444444444", "cliente comum")):
+    _sql_registrado.clear()
+    asyncio.run(repo.resumo_caixa(limite=5, dono_id=_dono))
+    asyncio.run(repo.estatisticas_do_dono(_dono))
+    check(f"a fila do painel monta query ({_rotulo})", len(_sql_registrado) >= 4,
+          f"{len(_sql_registrado)} consulta(s)")
+    for _i, (_sql, _args) in enumerate(_sql_registrado, 1):
+        # Cada SELECT (inclusive os de subquery) e um bloco com a sua propria
+        # cadeia FROM/JOIN: `a` repetir em subqueries diferentes e normal.
+        _repetidos: set[str] = set()
+        for _bloco in re.split(r"\bSELECT\b", _sql, flags=re.IGNORECASE):
+            _alias = [
+                _a.lower() for _t, _a in _JOIN_SEM_ALIAS_DUPLO.findall(_bloco)
+                if _a.lower() not in _NAO_ALIAS
+            ]
+            _repetidos |= {a for a in _alias if _alias.count(a) > 1}
+        check(f"consulta {_i} ({_rotulo}) sem tabela repetida no FROM/JOIN",
+              not _repetidos, f"repetido: {sorted(_repetidos)}")
+        _placeholders = {int(n) for n in re.findall(r"\$(\d+)", _sql)}
+        _esperados = set(range(1, (max(_placeholders) if _placeholders else 0) + 1))
+        check(f"consulta {_i} ({_rotulo}) com um valor para cada $n",
+              _placeholders == _esperados and len(_args) == len(_esperados),
+              f"${{{sorted(_placeholders)}}} com {len(_args)} argumento(s)")
+    # O dono precisa mesmo entrar no filtro, e so quando ele existe.
+    _com_dono = [s for s, a in _sql_registrado if "a.dono_id = $1" in s]
+    check(f"o filtro por dono entra no SQL ({_rotulo})",
+          bool(_com_dono) if _dono is not None else not _com_dono,
+          f"{len(_com_dono)} consulta(s) com filtro")
+repo.get_pool = _pool_original
 
 print("\n== correções: cache de sessão e papel ==")
 # O cache e por token e `limpar_cache(usuario_id)` removia por id: nunca
@@ -2346,6 +2423,133 @@ check("o token de emergencia e comparado em tempo constante",
 check("a mudanca de e-mail invalida a cache de isencao",
       "limpar_cache" in inspect.getsource(auth_mod.usuario_do_token)
       or "atualizar_email_perfil" in inspect.getsource(auth_mod.usuario_do_token))
+
+print("\n== correções: a entrada de emergência não leva 500 ==")
+# O id da conta do ADMIN_TOKEN é um sentinela sem linha em auth.users e NÃO é
+# uuid (de propósito: nada pode gravá-lo em coluna com FK). Usá-lo como
+# `dono_id`/`usuario_id` fazia o Postgres recusar, e essas rotas é justamente o
+# que o operador abre quando a plataforma está com problema: em producao
+# /api/painel/perfil, /api/painel/admin/config, /api/plano/pagamentos e
+# /api/admin/contas/nao-e-uuid respondiam 500.
+check("id_para_coluna_uuid devolve o id normal da conta",
+      auth_mod.id_para_coluna_uuid(
+          auth_mod.Usuario(id="u1", email="a@b", role=auth_mod.ROLE_USUARIO)) == "u1")
+check("id_para_coluna_uuid neutraliza a conta de emergencia",
+      auth_mod.id_para_coluna_uuid(auth_mod.ADMIN_EMERGENCIA) is None)
+check("o id de emergencia continua NAO sendo uuid (a FK protege)",
+      not _emergencia_e_uuid, auth_mod.ADMIN_EMERGENCIA.id)
+
+# Comportamento, nao leitura de fonte: as rotas sao chamadas de verdade com um
+# pool falso que rejeita qualquer id que nao seja uuid -- que e o que o
+# Postgres faz quando o valor nao cabe na coluna.
+_uuid_ruim: list[str] = []
+_ids_vistos: list[str] = []
+
+
+def _vigia_uuid(sql: str, *args):
+    # `app_config` guarda texto (a chave do config), nao uuid: nao e filtro de
+    # conta e nao interessa aqui.
+    if "app_config" in sql:
+        return
+    for a in args:
+        if not isinstance(a, str) or not a:
+            continue
+        _ids_vistos.append(a)
+        try:
+            uuid.UUID(a)
+        except ValueError:
+            _uuid_ruim.append(a)
+
+
+class _ConVigia:
+    async def fetch(self, sql, *args):
+        _vigia_uuid(sql, *args)
+        return []
+
+    async def fetchrow(self, sql, *args):
+        _vigia_uuid(sql, *args)
+
+    async def fetchval(self, sql, *args):
+        _vigia_uuid(sql, *args)
+
+    async def execute(self, sql, *args):
+        _vigia_uuid(sql, *args)
+        return "UPDATE 0"
+
+
+class _PoolVigia:
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return _ConVigia()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+async def _pool_vigia():
+    return _PoolVigia()
+
+
+class _ReqVigia:
+    def __init__(self, usuario):
+        self.state = type("St", (), {"usuario": usuario})()
+
+    async def json(self):
+        return {}
+
+
+import app.painel as _painel_mod  # noqa: E402
+import app.repos_cobranca as _rc_mod  # noqa: E402
+
+_pools = (repo, _rc_mod)
+_gp = [m.get_pool for m in _pools]
+for _m in _pools:
+    _m.get_pool = _pool_vigia
+
+for _nome, _rota in (("/api/painel/perfil", _painel_mod.perfil),
+                     ("/api/painel/admin/config", _painel_mod.ler_config_operacao),
+                     ("/api/plano/pagamentos", rotas_mod.meus_pagamentos),
+                     ("/api/admin/contas/nao-e-uuid", None)):
+    _uuid_ruim.clear()
+    _ids_vistos.clear()
+    if _rota is None:
+        # id fora do formato: 404, e o banco nem e consultado.
+        try:
+            asyncio.run(main_mod.admin_detalhe_conta("nao-e-uuid", _ReqVigia(
+                auth_mod.ADMIN_EMERGENCIA)))
+        except _HTTPException as e:
+            check(f"{_nome} -> 404 em vez de 500", e.status_code == 404, str(e.detail)[:50])
+        else:
+            check(f"{_nome} -> 404 em vez de 500", False, "devolveu 200")
+        check(f"{_nome} nem chega ao banco", not _ids_vistos, str(_ids_vistos))
+        continue
+    try:
+        _saida = asyncio.run(_rota(_ReqVigia(auth_mod.ADMIN_EMERGENCIA)))
+        _st = 200
+    except _HTTPException as e:
+        _saida, _st = str(e.detail), e.status_code
+    check(f"{_nome} responde para a conta de emergencia (sem 500)",
+          _st == 200, f"HTTP {_st}: {str(_saida)[:70]}")
+    check(f"{_nome} nao manda id que nao e uuid para o banco",
+          not _uuid_ruim, f"{_uuid_ruim}")
+
+# Mesma rota, conta normal: o id tem de continuar sendo o da conta.
+_uuid_ruim.clear()
+_ids_vistos.clear()
+_u = auth_mod.Usuario(id="8e80492f-1111-2222-3333-444444444444",
+                      email="u@x", role=auth_mod.ROLE_USUARIO)
+asyncio.run(_painel_mod.perfil(_ReqVigia(_u)))
+check("a conta normal continua consultando o proprio id",
+      _ids_vistos == [_u.id], str(_ids_vistos))
+check("o perfil da conta normal traz o email dela",
+      asyncio.run(_painel_mod.perfil(_ReqVigia(_u)))["email"] == "u@x")
+
+for _m, _f in zip(_pools, _gp):
+    _m.get_pool = _f
+check("reativar tambem recusa conta sem assinatura (admin/emergencia)",
+      "eh_admin" in inspect.getsource(rotas_mod.reativar))
 
 print("\n== correções: webhooks e SSRF ==")
 import app.pipeline as _pl_mod  # noqa: E402
@@ -2410,6 +2614,89 @@ for _v in ("1", "true", "SIM", "yes"):
     check(f"PAGAMENTO_DEMO={_v!r} liga o atalho de teste", _cfg_mod._verdadeiro(_v) is True)
 for _v in ("", "0", "false", "nao", None, "2"):
     check(f"PAGAMENTO_DEMO={_v!r} NAO liga o atalho de teste", _cfg_mod._verdadeiro(_v) is False)
+
+print("\n== correções: identificador de canal não entrega o canal alheio ==")
+# Antes, a recusa de phone_number_id / verify_token duplicado citava o NOME do
+# canal em conflito: `listar_canais()` sem filtro traz os canais de todos os
+# clientes (o app roda com o papel postgres, que ignora RLS), e a checagem
+# rodava na criação/edição de qualquer canal oficial.
+_chamadas: list[tuple] = []
+_ocupados: set[tuple] = set()
+
+
+async def _usa_falso(tipo, campo, valor, *, ignorar_canal_id=None):
+    _chamadas.append((tipo, campo, valor, ignorar_canal_id))
+    return (tipo, campo, valor) in _ocupados
+
+
+_usa_real = repo.canal_usa_identificador
+repo.canal_usa_identificador = _usa_falso
+main_mod.repo = repo
+
+
+def _recusa(nome, tipo, config, **kw):
+    try:
+        asyncio.run(main_mod._exigir_identificador_unico(tipo, config, **kw))
+    except _HTTPException as e:
+        return e
+    return None
+
+
+_ocupados.add(("whatsapp_oficial", "phone_number_id", "555"))
+_ocupados.add((None, "verify_token", "vt-repetido"))
+e = _recusa("x", "whatsapp_oficial", {"phone_number_id": "555", "verify_token": "vt-repetido"})
+check("id de conta repetido e recusado com 409", e is not None and e.status_code == 409,
+      str(getattr(e, "detail", "aceitou"))[:60])
+check("a recusa nao cita o nome do canal de outro cliente",
+      e is not None and "canal \"" not in str(e.detail), str(getattr(e, "detail", "")))
+check("a recusa ainda diz o que fazer",
+      e is not None and "único canal" in str(e.detail), str(getattr(e, "detail", ""))[:80])
+
+_chamadas.clear()
+e = _recusa("x", "instagram_oficial", {"ig_user_id": "9", "verify_token": "vt-repetido"})
+check("ig_user_id livre passa; e o verify_token repetido que barra",
+      e is not None and e.status_code == 409 and "verify_token" in str(e.detail),
+      str(getattr(e, "detail", "aceitou"))[:60])
+check("a recusa do verify_token nao devolve o token em claro",
+      e is not None and "vt-repetido" not in str(e.detail), str(getattr(e, "detail", "")))
+check("o verify_token e conferido entre os dois tipos oficiais (o handshake nao manda o id)",
+      any(c[0] is None and c[1] == "verify_token" for c in _chamadas), str(_chamadas))
+
+_chamadas.clear()
+e = _recusa("x", "telegram", {"token": "x"})
+check("canal nao oficial nao passa pela checagem de identificador",
+      e is None and not _chamadas, str(_chamadas))
+
+_chamadas.clear()
+e = _recusa("x", "whatsapp_oficial",
+            {"phone_number_id": "555", "verify_token": "vt-repetido"}, ignorar_canal_id=7)
+check("a edicao manda o id do proprio canal para ser ignorado",
+      bool(_chamadas) and all(c[3] == 7 for c in _chamadas), str(_chamadas))
+
+_ocupados.clear()
+e = _recusa("x", "whatsapp_oficial", {"phone_number_id": "555", "verify_token": "vt"})
+check("sem conflito os dois identificadores passam", e is None, str(getattr(e, "detail", "")))
+
+check("a checagem nao percorre mais a lista inteira de canais",
+      "listar_canais" not in inspect.getsource(main_mod._exigir_identificador_unico))
+repo.canal_usa_identificador = _usa_real  # as checagens abaixo sao da funcao real
+_fonte_usa = inspect.getsource(_usa_real)
+check("a consulta e um EXISTS (nao devolve config/nome de ninguem)",
+      "SELECT EXISTS" in _fonte_usa and "btrim(coalesce(config ->> $3" in _fonte_usa)
+check("o campo vai como parametro do SQL, nunca colado no texto da consulta",
+      "$3" in _fonte_usa and "{campo}" not in _fonte_usa)
+for _fora in ("); DROP TABLE canais; --", "tipo = ANY($1)", "id = $1"):
+    try:
+        asyncio.run(_usa_real("whatsapp_oficial", _fora, "1"))
+    except ValueError:
+        check(f"chave fora da lista e recusada antes do SQL: {_fora[:18]!r}", True)
+    except Exception as e:  # noqa: BLE001
+        check(f"chave fora da lista e recusada antes do SQL: {_fora[:18]!r}", False, type(e).__name__)
+    else:
+        check(f"chave fora da lista e recusada antes do SQL: {_fora[:18]!r}", False, "chegou ao banco")
+check("a lista fechada cobre so as chaves de roteamento da Meta",
+      repo.CAMPOS_ROTEAMENTO_META == ("phone_number_id", "ig_user_id", "verify_token"),
+      str(repo.CAMPOS_ROTEAMENTO_META))
 
 # --------------------------------------------------------------------------
 print("\n== resumo ==")
