@@ -1844,6 +1844,27 @@ try:
     _ok_isento, _txt_isento = asyncio.run(lim.checar_mensagem("u-isento", 1))
     check("isento nunca e barrado por cota de mensagem",
           _ok_isento and _txt_isento == "")
+
+    # /api/plano/limites e o que o painel le para habilitar o botao "criar
+    # canal": isento tem de responder sem_cota, como o admin e como o proprio
+    # /api/plano ja respondia. Sem isso, o botao aparecia desabilitado para
+    # uma conta que nunca paga.
+    class _Req:
+        headers = {}
+
+    class _U:
+        id = "u-isento"
+        email = "jgkwy07@gmail.com"
+        eh_admin = False
+
+    _senha_antes = rotas_mod.usuario_atual
+    rotas_mod.usuario_atual = lambda _r: _U()
+    try:
+        _j = asyncio.run(rotas_mod.limites_atuais(_Req()))
+        check("isento recebe sem_cota em /api/plano/limites (botao liberado)",
+              _j.get("sem_cota") is True and _j.get("pode_criar_agente") is True, _j)
+    finally:
+        rotas_mod.usuario_atual = _senha_antes
 finally:
     lim.eh_isento_por_id = _orig_isento_id
     lim.rc.garantir_assinatura = _orig_garantir

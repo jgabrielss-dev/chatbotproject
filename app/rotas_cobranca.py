@@ -406,7 +406,12 @@ async def limites_atuais(request: Request):
     pior do que botão cinza.
     """
     usuario = usuario_atual(request)
-    if usuario.eh_admin or limites.sem_cota():
+    # Isento entra aqui junto com o admin: os dois têm o mesmo desenho no
+    # `/api/plano` (limites zerados = ilimitado) e é o que o painel lê para
+    # habilitar o botão "criar canal". Deixar a isenta de fora devolvia
+    # `sem_cota: false` com um teto de 50 agentes — o botão apareceria
+    # desabilitado para uma conta que nunca, em hipótese nenhuma, paga.
+    if usuario.eh_admin or await limites.eh_isento_por_id(usuario.id) or limites.sem_cota():
         return {"sem_cota": True, "pode_criar_agente": True, "pode_criar_canal": True}
     p = await limites.plano_atual(usuario.id)
     usados = await limites.contar_agentes(usuario.id)
