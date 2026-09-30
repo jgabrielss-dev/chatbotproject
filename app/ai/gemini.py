@@ -168,7 +168,19 @@ async def atualizar_memoria(
     memoria: dict,
     trechos: list[str],
 ) -> dict:
-    """Pede ao Gemini para extrair/atualizar a memória JSONB da sessão."""
+    """Pede ao Gemini para extrair/atualizar a memória JSONB da sessão.
+
+    Custa uma chamada de IA **por turno**, e só por isso: quem mede limite
+    (item 9 e item 14) conta mensagens, e uma mensagem aqui vale duas chamadas.
+    Fica escrito para ninguém achar que o limite de mensagens é o mesmo que a
+    fatura.
+
+    `system_prompt` entra na assinatura porque é o mesmo contexto do agente da
+    sessão; hoje a memória é extraída sem ele (só os trechos), e o parâmetro
+    fica para o dia em que a extração precisar saber de quem é a conversa.
+
+    Nunca levanta: falha aqui devolve a memória de antes, e a conversa segue.
+    """
     if not settings.has_gemini:
         return memoria
     return await asyncio.to_thread(_atualizar_memoria_sync, memoria, trechos)
