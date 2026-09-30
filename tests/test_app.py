@@ -1767,9 +1767,13 @@ if tem_testclient:
             with TestClient(main_mod.app) as c:
                 codigos = []
                 for i in range(5):
+                    # O X-Forwarded-For é o que o proxy do Render manda; sem ele
+                    # o módulo se recusa a contar (ver teste do proxy sem
+                    # cabeçalho), e aqui estaríamos testando o nada.
                     r = c.post("/api/interno/produto",
                                json={"sessao": f"token-falso-{i:04d}xx",
-                                     "texto": "oi"})
+                                     "texto": "oi"},
+                               headers={"x-forwarded-for": "189.45.20.20"})
                     codigos.append(r.status_code)
                     _ultimo_texto = r.text
                 check("girar o token da sessao NAO zera a cota da home (item 14)",
@@ -1779,6 +1783,17 @@ if tem_testclient:
                       "conta" in _ultimo_texto.lower(), _ultimo_texto[:90])
                 check("a cota por conversa continua valendo antes do teto de IP",
                       fake.quota == 0, str(fake.quota))
+
+                # Fail-open pelo caminho real: sem IP confiavel (aqui, host do
+                # TestClient), o teto de 1 nao pode derrubar a venda.
+                _ltm.limpar()
+                object.__setattr__(main_mod.settings, "limite_turno_anonimo_hora", 1)
+                _sem_ip = [c.post("/api/interno/produto",
+                                  json={"sessao": f"sem-ip-{i:04d}xx",
+                                        "texto": "oi"}).status_code
+                           for i in range(3)]
+                check("sem IP confiavel a home nao e barrada (fail-open do teto)",
+                      _sem_ip == [200, 200, 200], str(_sem_ip))
             _desmontar_fakes()
         finally:
             object.__setattr__(main_mod.settings, "limite_turno_anonimo_hora",
@@ -1971,9 +1986,14 @@ import app.limite_turnos as _lt
 
 
 class _Req:
-    """Request mínima: o módulo só olha o cabeçalho e o host do socket."""
+    """Request mínima: o módulo só olha o cabeçalho e o host do socket.
 
-    def __init__(self, host="10.0.0.1", xff=None):
+    O host padrão é **público** de propósito: endereço privado é o sintoma de
+    "estou atrás de proxy sem cabeçalho", e nesse caso o módulo se recusa a
+    contar (ver o teste do proxy sem cabeçalho abaixo).
+    """
+
+    def __init__(self, host="189.45.20.10", xff=None):
         self.headers = {"x-forwarded-for": xff} if xff else {}
         self.client = type("_Peer", (), {"host": host})()
 
@@ -1990,9 +2010,9 @@ try:
     # mesma rede de outra pessoa seria pior que o abuso que isto previne.
     _lt_limpar()
     for _ in range(3):
-        _lt.checa_turno_anonimo(_Req(host="10.0.0.1"), 3, 0)
+        _lt.checa_turno_anonimo(_Req(host="189.45.20.11"), 3, 0)
     check("outro IP comec limpo mesmo com o primeiro estourado",
-          _lt.checa_turno_anonimo(_Req(host="10.0.0.2"), 3, 0) == "")
+          _lt.checa_turno_anonimo(_Req(host="189.45.20.12"), 3, 0) == "")
 
     # A janela do dia e a que segura o abuso lento (um turno por minuto durante a
     # semana toda), e ela conta separada da hora.
@@ -2010,10 +2030,23 @@ try:
     check("o IP e o ultimo do X-Forwarded-For, nao o forjado da frente",
           _lt.chave_do_ip(_Req(xff="1.1.1.1, 9.9.9.9, 200.100.50.10"))
           == "200.100.50.10")
-    check("sem X-Forwarded-For cai no host do socket",
-          _lt.chave_do_ip(_Req(host="127.0.0.1")) == "127.0.0.1")
-    check("XFF so com lixo nao vira IP de barreira",
-          _lt.chave_do_ip(_Req(xff=" , , ")) == "10.0.0.1")
+    check("sem X-Forwarded-For e host publico, usa o host do socket",
+          _lt.chave_do_ip(_Req(host="189.45.20.13")) == "189.45.20.13")
+
+    # O caso que derrubaria a home inteira: proxy SEM cabeçalho util. O host do
+    # socket e o IP interno do proxy, o mesmo para todo mundo, e contar por ele
+    # entregaria a internet numa chave so -- o teto de um abusive viraria 429
+    # para todo mundo. Sem IP confiavel, nao conta.
+    for _host in ("10.0.0.1", "127.0.0.1", "192.168.1.1", "", "nao-e-ip"):
+        check(f"proxy sem cabecalho (host {_host!r}) nao vira chave de contagem",
+              _lt.chave_do_ip(_Req(host=_host)) is None)
+    _lt_limpar()
+    _sem_chave = [_lt.checa_turno_anonimo(_Req(host="10.0.0.1"), 1, 1)
+                  for _ in range(50)]
+    check("e por isso o chat nunca e barrado sem IP confiavel",
+          _sem_chave == [""] * 50, str(_sem_chave[:4]))
+    check("XFF sujo tambem libera em vez de contar em uma chave so",
+          _lt.checa_turno_anonimo(_Req(xff=" , , "), 1, 1) == "")
 
     # Falha de contagem NAO pode derrubar a venda da home: libera.
     _conta_orig = _lt._conta
@@ -2057,7 +2090,7 @@ try:
     # O mapa nao cresce sem teto: varrao de IPs diferentes nao enche a memoria do
     # processo, que e a memoria da venda.
     for i in range(_lt._CHAVES_MAX + 50):
-        _lt.checa_turno_anonimo(_Req(host=f"10.1.{i // 256}.{i % 256}"), 10**6, 0)
+        _lt.checa_turno_anonimo(_Req(host=f"189.{i // 65536}.{(i // 256) % 256}.{i % 256}"), 10**6, 0)
     check("o mapa de IPs nao cresce sem limite",
           len(_lt._janelas) <= _lt._CHAVES_MAX, str(len(_lt._janelas)))
 finally:

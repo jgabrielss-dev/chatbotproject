@@ -32,6 +32,7 @@ Duas garantias de projeto:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 
@@ -53,19 +54,37 @@ _CHAVES_MAX = 4096
 _janelas: dict[str, list[float]] = {}
 
 
-def chave_do_ip(request: Request) -> str:
+def chave_do_ip(request: Request) -> str | None:
     """Endereço de quem está chamando, do jeito que dá para confiar atrás do proxy.
 
     O `X-Forwarded-For` é uma cadeia em que cada proxy **acrescenta** no fim o
     endereço que viu chegar. Então o último item é o que o proxy do Render viu:
     quem manda cabeçalho forjado só consegue se esconder no começo da lista,
-    que é descartado. Sem o cabeçalho (dev local, teste) cai no peer do socket.
+    que é descartado.
+
+    `None` é uma resposta deliberada. Sem o cabeçalho (dev local) sobra o host
+    do socket, e atrás de proxy ele é o IP **interno** do proxy — o mesmo para
+    todo mundo. Contar por ele seria juntar a internet inteira numa chave e o
+    teto do abusive viraria queda da home para todos. Endereço privado,
+    loopback ou link-local quer dizer "não sei quem é", e quem não sabe não
+    conta (ver `checa_turno_anonimo`).
     """
     cabecalho = request.headers.get("x-forwarded-for") or ""
     for parte in reversed(cabecalho.split(",")):
         if ip := parte.strip():
             return ip[:60]
-    return (request.client.host if request.client else "") or "desconhecido"
+    host = (request.client.host if request.client else "") or ""
+    return None if _nao_publico(host) else host[:60]
+
+
+def _nao_publico(ip: str) -> bool:
+    """O endereço não serve para separar uma pessoa de outra."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True  # nem parece IP: melhor não contar do que contar tudo junto
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
 
 
 def _conta(chave: str, teto_hora: int, teto_dia: int, agora: float) -> str:
@@ -125,8 +144,10 @@ def checa_turno_anonimo(request: Request, teto_hora: int, teto_dia: int) -> str:
     contagem.
     """
     try:
-        return _conta(chave_do_ip(request), teto_hora, teto_dia,
-                      time.monotonic())
+        chave = chave_do_ip(request)
+        if chave is None:
+            return ""  # sem IP confiável: quem não sabe quem é, não barra
+        return _conta(chave, teto_hora, teto_dia, time.monotonic())
     except Exception:
         log.exception("Falha ao contar turno anônimo; liberando o chat")
         return ""
