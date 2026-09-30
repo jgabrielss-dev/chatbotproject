@@ -335,7 +335,13 @@ $("btnExcluirAgente").onclick = async () => {
 /* ---------------- Canais ---------------- */
 
 async function carregarCanais(agenteId) {
-  Object.values(timers).forEach(clearInterval);
+  // Apaga a CHAVE, não só o intervalo: quem cria o timer consulta
+  // `timers[c.id] || setInterval(...)`. Limpar o intervalo e manter a chave
+  // deixava um id morto no objeto, e o canal parava de atualizar o QR no
+  // primeiro `carregarCanais` (o botão "Atualizar" da lista, chamado a cada
+  // troca de aba). Os dois `delete` abaixo já limpavam na hora; este é o
+  // caminho de recarregar a lista inteira.
+  for (const k of Object.keys(timers)) { clearInterval(timers[k]); delete timers[k]; }
   const canais = await api(`/api/agentes/${agenteId}/canais`);
   const el = $("canais");
   el.innerHTML = "";
@@ -872,7 +878,16 @@ $("btnFecharContas").onclick = () => $("contasCard").classList.add("hidden");
 // A sessao e resolvida AQUI, nao no auth.js: o painel precisa saber o
 // papel antes de buscar qualquer dado. Sem sessao -> login; sessao de
 // cliente -> /painel. So o admin chega a carregar o painel.
-const eu = await Auth.obterSessao();
+// `obterSessao` rejeita quando o servidor responde 503 (sem Supabase Auth) ou
+// a rede cai. Sem este `catch`, a rejeição saía do módulo e a tela ficava
+// branca — sem sidebar, sem abas e sem nenhuma mensagem dizendo o motivo.
+let eu = null;
+try {
+  eu = await Auth.obterSessao();
+} catch (e) {
+  alert(e.message);
+  throw e;
+}
 if (!eu) {
   location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("admin")));
   throw new Error("sem sessao");  // aborta antes de qualquer fetch

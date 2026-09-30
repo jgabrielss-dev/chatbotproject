@@ -24,5 +24,13 @@ refresh_token_reuse_interval = 10
 enabled = false
 file_size_limit = "50MiB"
 
+[functions.inbox]
+# A Meta e o Telegram chamam esta função sem Authorization: não são usuários do
+# projeto e não podem enviar JWT. Com o padrão do Supabase (`verify_jwt =
+# true`) todo POST devolvia 401 e o canal oficial não recebia mensagem
+# nenhuma. A autenticação do webhook é o segredo na própria URL, conferida
+# dentro da função — ver `verificarSegredo` em `index.ts`.
+verify_jwt = false
+
 [secrets]
 # nenhum segredo nesta fase (sem cobrança)

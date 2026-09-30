@@ -76,12 +76,21 @@ Regras sobre anexos:
 
 
 def _montar_historico(historico: list[dict]) -> list[types.Content]:
+    # O primeiro turno tem que ser do usuario. A API do Gemini rejeita a
+    # conversa que começa em `model` ("Please use a user role for the first
+    # message") e isso aparecia como "modelo indisponivel", ja que o erro
+    # saia pelo mesmo `except` que try dos modelos. Uma sessao cuyo primeiro
+    # registro e da IA nao acontece pelo fluxo normal, mas o historico vem do
+    # banco e nao vale o risco de uma tela transformar a conta em erro.
+    turnos = [m for m in historico if (m.get("texto") or "").strip()]
+    while turnos and turnos[0].get("de_ia"):
+        turnos.pop(0)
     return [
         types.Content(
             role="user" if not m["de_ia"] else "model",
             parts=[types.Part(text=m["texto"])],
         )
-        for m in historico
+        for m in turnos
     ]
 
 
@@ -113,11 +122,33 @@ def _gerar(conteudo: str | list[types.Content], instrucao: str | None = None) ->
                 contents=conteudo,
                 config=config,
             )
+            # `response.text` é `Optional` no `google-genai` e vem `None` quando
+            # a resposta foi bloqueada por filtro de segurança ou quando o
+            # modelo devolveu só FunctionCall. Antes, `.text.strip()` virava
+            # `AttributeError`, caía no `except` e o log dizia "modelo
+            # indisponivel" — o motivo real sumia e o usuário recebia
+            # "Gemini indisponível" para uma resposta que era um bloqueio.
+            if resposta.text is None:
+                bloqueio = _texto_bloqueio(resposta)
+                raise ValueError(
+                    "O Gemini nao devolveu texto"
+                    + (f" (bloqueio: {bloqueio})" if bloqueio else "")
+                    + "."
+                )
             return resposta.text.strip()
         except Exception as e:  # tenta o proximo modelo
             log.warning("Modelo %s indisponivel: %s", modelo, str(e)[:120])
             erro = e
     raise erro if erro else RuntimeError("Nenhum modelo Gemini disponivel.")
+
+
+def _texto_bloqueio(resposta) -> str:
+    """O motivo do bloqueio, quando a API diz. Só para o log ficar útil."""
+    try:
+        p = resposta.prompt_feedback
+        return str(getattr(p, "block_reason", "") or "")[:80]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _partes_da_mensagem(mensagem: str, anexos: list[bytes | tuple[str, bytes]]) -> list[types.Part]:

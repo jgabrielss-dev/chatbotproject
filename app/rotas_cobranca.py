@@ -277,12 +277,36 @@ async def _abrir_periodo_pago(usuario_id: str, pagamento: dict) -> None:
         if fim.tzinfo is None:
             fim = fim.replace(tzinfo=dt.timezone.utc)
     expirada = assinatura.get("status") in ("cancelado", "expirado")
-    inicio = agora if (fim is None or expirada or fim <= agora) else fim
     p = cobranca.plano(pagamento.get("plano_id"))
     ciclo = cobranca.normalizar_ciclo(pagamento.get("ciclo"))
-    novo_fim = cobranca.fim_do_periodo(inicio, ciclo)
 
-    await rc.aplicar_plano_pago(usuario_id, p.id, ciclo, inicio, novo_fim, pagamento["id"])
+    # Pagamento ADIANTADO: o período ainda não terminou. Aqui é onde a regra do
+    # item 9 ("preço e regras mudam só no fim do período já pago") estava
+    # furada: o período novo começava no `fim_periodo` (futuro) e o `plano_id`
+    # era trocado na mesma hora. O cliente ficava com `inicio_periodo` no
+    # futuro servindo já as regras do plano novo, e um DOWNGRADE antecipado
+    # cortava o limite que ele tinha pago antes de vencer.
+    #
+    # A correção: o que muda agora é só o FIM do período, estendido até o fim
+    # do que foi pago. O `plano_id` continua o que está valendo, e o plano novo
+    # vai para `plano_proximo` — que é exatamente para isso que a coluna
+    # existe. Ele entra em vigor em `atualizar_periodo`, quando o período
+    # antigo realmente termina.
+    #
+    # Se o período já venceu (ou nunca existiu), o plano novo começa agora.
+    ja_vencido = fim is None or expirada or fim <= agora
+    if not ja_vencido:
+        await rc.aplicar_plano_pago(
+            usuario_id, p.id, ciclo, assinatura.get("inicio_periodo"),
+            cobranca.fim_do_periodo(fim, ciclo), pagamento["id"],
+            adiar=True,
+        )
+        return
+
+    await rc.aplicar_plano_pago(
+        usuario_id, p.id, ciclo, agora, cobranca.fim_do_periodo(agora, ciclo),
+        pagamento["id"],
+    )
 
 
 @router.post("/api/plano/pagamento/{pagamento_id}/checkout")

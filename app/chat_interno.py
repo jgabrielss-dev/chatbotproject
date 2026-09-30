@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import agentes_internos as ai
-from app import cobranca, limite_turnos, midia, pipeline
+from app import cobranca, limite_turnos, limites, midia, pipeline
 from app import repos_cobranca as rc
 from app import repositories as repo
 from app.ai import gemini
@@ -161,6 +161,22 @@ def _plano_por_id(plano_id: str) -> cobranca.Plano | None:
     return None
 
 
+def _ordem_de(plano: dict | None) -> int:
+    """A posição do plano na escada, pelo CATÁLOGO.
+
+    Aceita o dicionário que veio do `contexto_de_cota` (que já traz `ordem`) e
+    também um `id` solto. O catálogo é a fonte: ele é o que define o que é
+    upgrade, então é nele que a ordem é lida.
+    """
+    if not plano:
+        return 0
+    if isinstance(plano, str):
+        p = _plano_por_id(plano)
+        return p.ordem if p else 0
+    p = _plano_por_id(plano.get("id") or plano.get("plano_id"))
+    return p.ordem if p else 0
+
+
 def _data_br(quando) -> str:
     """`dt.datetime` ou ISO string (o que `contexto()` da pelos períodos).
 
@@ -279,16 +295,36 @@ async def _acao_mudar_plano(usuario_id: str, dados: dict) -> dict:
     if not r.get("fim_periodo"):
         return {"erro": "sua assinatura nao tem periodo em aberto."}
     atual = (r.get("plano") or {}).get("nome")
-    ordem_atual = (r.get("plano") or {}).get("ordem") or 0
+    # A ordem vem do CATÁLOGO, não do dicionário que veio do `contexto_de_cota`.
+    # `Plano.detalhe()` já publicava `ordem` depois de outro ajuste, mas ler
+    # `(plano or {}).get("ordem")` aqui caía no 0 do `.get()` e tratava
+    # qualquer troca como upgrade — inclusive downgrade, que virava cobrança
+    # indevida. O catálogo é a fonte única que define a ordem dos planos.
+    ordem_atual = _ordem_de(r.get("plano"))
     preco = destino.preco_anual if ciclo == "anual" else destino.preco_mensal
     upgrade = destino.ordem > ordem_atual
 
-    pagamento = None
-    if upgrade and preco > 0:
-        pagamento = await rc.criar_pagamento(
-            usuario_id, destino.id, ciclo, preco, metodo="suporte")
+    # Mesmas travas da rota HTTP, e na mesma ordem. Sem a conferência, cada
+    # mensagem do cliente ("mudei meu plano") criava um pagamento pendente
+    # novo: cinco cobranças iguais na tela por repetir a frase. `proximo_id` é
+    # a troca já agendada, e reusar o pagamento pendente equivalente é o que
+    # mantém o chat idempotente.
+    assinatura = await rc.garantir_assinatura(usuario_id)
+    pode, motivo = cobranca.pode_trocar_de_plano(
+        assinatura.get("plano_id"), destino.id, assinatura.get("plano_proximo"),
+    )
+    if not pode:
+        return {"erro": motivo}
 
     await rc.agendar_troca(usuario_id, destino.id, ciclo)
+    limites.limpar_cache(usuario_id)
+
+    pagamento = None
+    if upgrade and preco > 0:
+        pagamento = await rc.pagamento_pendente_equivalente(usuario_id, destino.id, ciclo)
+        if not pagamento:
+            pagamento = await rc.criar_pagamento(
+                usuario_id, destino.id, ciclo, preco, metodo="suporte")
     return {
         "plano_atual": atual,
         "plano_novo": destino.nome,

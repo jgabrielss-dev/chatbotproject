@@ -18,6 +18,13 @@
 // keepalive é necessário, então o app passa o mês hibernando. Nos canais NÃO
 // OFICIAIS (evolution, instagrapi) o keepalive continua sendo obrigatório.
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import {
+  LIMITE_TEXTO,
+  anexoEvolution,
+  anexoTelegram,
+  descrever,
+  origemFallback,
+} from "./anexo.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -96,25 +103,43 @@ async function enfileirar(linha: Record<string, unknown>) {
 
 async function handleTelegram(canalId: string, secret: string, payload: any) {
   const { data: canal, error } = await supabase
-    .from("canais").select("id, tipo, config").eq("id", canalId).maybeSingle();
+    .from("canais").select("id, tipo, ativo, config").eq("id", canalId).maybeSingle();
   if (error) return json({ ok: false }, 500);
   if (!canal || canal.tipo !== "telegram" || !segredoIgual(canal.config?.secret, secret)) {
     return json({ ok: false }, 404);
   }
+  // Canal pausado não enfileira: o worker devolveria o item para o fim da fila
+  // a cada tentativa ("canal está pausado"), gastando ida e volta sem nunca
+  // responder. Mesma regra de `app/main.py`.
+  if (canal.ativo === false) return json({ ok: true, ignorado: "canal pausado" });
+
   const msg = payload?.message ?? {};
   const chat = msg.chat ?? {};
-  const texto = typeof msg.text === "string" ? msg.text : null;
+  const anexo = anexoTelegram(payload);
+  const bruto = typeof msg.text === "string" && msg.text
+    ? msg.text
+    : (typeof msg.caption === "string" ? msg.caption : "");
   const chatId = chat.id != null ? String(chat.id) : null;
-  if (texto && chatId) {
+  const texto = bruto.slice(0, LIMITE_TEXTO) || descrever(anexo);
+  if (chatId && texto) {
+    const updateId = payload?.update_id;
+    // `origem` nunca pode ser degenerada: o índice único é (canal_id, origem),
+    // então "tg:" faria TODAS as mensagens seguintes deste canal colidirem
+    // entre si e serem descartadas em silêncio. Sem id do evento, a
+    // deduplicação cai para o hash do corpo: o reenvio do mesmo webhook segue
+    // sendo o mesmo item e mensagens diferentes viram origens diferentes.
+    const origem = updateId != null && String(updateId) !== ""
+      ? `tg:${updateId}`
+      : await origemFallback("tg", payload);
     const r = await enfileirar({
       canal_id: canal.id,
       remetente: chatId,
       texto,
-      origem: `tg:${payload?.update_id ?? ""}`,
-      payload_json: payload ?? {},
+      origem,
+      payload_json: anexo ? { ...(payload ?? {}), anexo } : (payload ?? {}),
       status: "pendente",
     });
-    console.log("inbox", JSON.stringify({ rota: "telegram", canalId, origem: `tg:${payload?.update_id ?? ""}`, insert: r.error ? { err: r.error.message, code: r.error.code } : { status: r.status } }));
+    console.log("inbox", JSON.stringify({ rota: "telegram", canalId, origem, anexo: !!anexo, insert: r.error ? { err: r.error.message, code: r.error.code } : { status: r.status } }));
     if (r.error) return json({ ok: false, error: r.error.message }, 500);
     wake();
   }
@@ -123,7 +148,7 @@ async function handleTelegram(canalId: string, secret: string, payload: any) {
 
 async function handleEvolution(canalId: string, secret: string, payload: any) {
   const { data: canal, error } = await supabase
-    .from("canais").select("id, tipo, config").eq("id", canalId).maybeSingle();
+    .from("canais").select("id, tipo, ativo, config").eq("id", canalId).maybeSingle();
   if (error) return json({ ok: false }, 500);
   if (!canal || canal.tipo !== "whatsapp") return json({ ok: false }, 404);
   // O segredo na URL fecha o endpoint: sem ele, qualquer um que adivinhasse o
@@ -138,6 +163,13 @@ async function handleEvolution(canalId: string, secret: string, payload: any) {
 
   const evento = String(payload?.event ?? "").toUpperCase().replace(/\./g, "_");
   const data = payload?.data ?? {};
+
+  // Canal pausado: QR e estado da conexão continuam passando (são configuração,
+  // não atendimento — sem eles o dono pausado não conseguiria reconectar), mas
+  // mensagem não entra na fila. Mesma regra de `app/main.py`.
+  if (canal.ativo === false && evento !== "QRCODE_UPDATED" && evento !== "CONNECTION_UPDATE") {
+    return json({ ok: true, ignorado: "canal pausado" });
+  }
 
   if (evento === "QRCODE_UPDATED") {
     const qrDados = data.qrcode ?? data;
@@ -162,20 +194,31 @@ async function handleEvolution(canalId: string, secret: string, payload: any) {
     if (key.fromMe) return json({ ok: true });
     const msg = data?.message ?? {};
     const ext = msg.extendedTextMessage ?? {};
-    const texto = msg.conversation ?? ext.text;
+    const anexo = anexoEvolution(data);
+    // A legenda de um anexo é o texto da mensagem ("isso aqui quebrou" numa
+    // foto é o caso mais comum no WhatsApp) e, sem ela, o agente responderia
+    // sobre a imagem em vez de sobre o problema.
+    const legenda = anexo ? anexo.legenda : "";
+    const bruto = msg.conversation ?? ext.text ?? legenda;
     let remote = key.remoteJid ?? null;
     if (remote) remote = String(remote).split("@")[0];
-    if (texto && remote) {
+    const texto = String(bruto || "").slice(0, LIMITE_TEXTO) || descrever(anexo);
+    if (remote && texto) {
       const keyId = String(key.id ?? "");
+      // `origem` nunca pode ser degenerada: o índice único é (canal_id, origem),
+      // então "wa:" faria TODAS as mensagens seguintes deste canal colidirem
+      // entre si e serem descartadas em silêncio. Sem id do evento, a
+      // deduplicação cai para o hash do corpo.
+      const origem = keyId ? `wa:${keyId}` : await origemFallback("wa", data);
       const r = await enfileirar({
         canal_id: canal.id,
         remetente: remote,
         texto,
-        origem: `wa:${keyId}`,
-        payload_json: data ?? {},
+        origem,
+        payload_json: anexo ? { ...(data ?? {}), anexo } : (data ?? {}),
         status: "pendente",
       });
-      console.log("inbox", JSON.stringify({ rota: "evolution", canalId, origem: `wa:${keyId}`, insert: r.error ? { err: r.error.message, code: r.error.code } : { status: r.status } }));
+      console.log("inbox", JSON.stringify({ rota: "evolution", canalId, origem, anexo: !!anexo, insert: r.error ? { err: r.error.message, code: r.error.code } : { status: r.status } }));
       if (r.error) return json({ ok: false, error: r.error.message }, 500);
       wake();
     }

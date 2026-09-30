@@ -180,7 +180,8 @@ async def agendar_troca(usuario_id: str, plano_proximo: str, ciclo: str = "mensa
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """UPDATE assinaturas
-               SET plano_proximo = $2, ciclo_proximo = $3, atualizado_em = now()
+               SET plano_proximo = $2, ciclo_proximo = $3,
+                   proximo_pago = false, atualizado_em = now()
                WHERE usuario_id = $1
                RETURNING *""",
             usuario_id, p.id, ciclo,
@@ -193,7 +194,8 @@ async def cancelar_troca(usuario_id: str) -> dict:
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """UPDATE assinaturas
-               SET plano_proximo = NULL, ciclo_proximo = NULL, atualizado_em = now()
+               SET plano_proximo = NULL, ciclo_proximo = NULL, proximo_pago = false,
+                   atualizado_em = now()
                WHERE usuario_id = $1 RETURNING *""",
             usuario_id,
         )
@@ -245,6 +247,7 @@ async def aplicar_plano_pago(
     inicio: dt.datetime,
     fim: dt.datetime,
     pagamento_id: int,
+    adiar: bool = False,
 ) -> dict:
     """Abre o período novo e promove o plano pago, numa transação só.
 
@@ -259,6 +262,13 @@ async def aplicar_plano_pago(
     fica como está. Sem isto, duas confirmações simultâneas do mesmo pagamento
     (webhook do MP + polling do navegador) estendiam o período duas vezes — dois
     meses por um PIX.
+
+    `adiar=True` é o pagamento ANTECIPADO: o período que ainda está correndo
+    continua valendo, o `fim_periodo` só é estendido pelo que foi pago, e o
+    plano novo fica em `plano_proximo` para entrar em vigor quando o anterior
+    vencer. Sem esse desvio, o `plano_id` era trocado na hora e o cliente
+    passava a ter as regras do plano novo antes de ter pago o antigo inteiro —
+    a regra do item 9 furada justamente no caso em que ela existe.
     """
     pool = await get_pool()
     async with pool.acquire() as con:
@@ -270,15 +280,28 @@ async def aplicar_plano_pago(
             )
             if not marcado:
                 return None
-            row = await con.fetchrow(
-                """UPDATE assinaturas SET
-                     plano_id = $2, ciclo = $3, status = 'ativo',
-                     inicio_periodo = $4, fim_periodo = $5,
-                     plano_proximo = NULL, ciclo_proximo = NULL, cancela_em = NULL,
-                     atualizado_em = now()
-                   WHERE usuario_id = $1 RETURNING *""",
-                usuario_id, plano_id, ciclo, inicio, fim,
-            )
+            if adiar:
+                # `proximo_pago = true` é o que autoriza a promoção quando o
+                # período vencer. O `plano_id` NÃO é tocado: o plano que está
+                # valendo continua valendo até lá.
+                row = await con.fetchrow(
+                    """UPDATE assinaturas SET
+                         plano_proximo = $2, ciclo_proximo = $3, proximo_pago = true,
+                         fim_periodo = $4, status = 'ativo', cancela_em = NULL,
+                         atualizado_em = now()
+                       WHERE usuario_id = $1 RETURNING *""",
+                    usuario_id, plano_id, ciclo, fim,
+                )
+            else:
+                row = await con.fetchrow(
+                    """UPDATE assinaturas SET
+                         plano_id = $2, ciclo = $3, status = 'ativo',
+                         inicio_periodo = $4, fim_periodo = $5,
+                         plano_proximo = NULL, ciclo_proximo = NULL, cancela_em = NULL,
+                         atualizado_em = now()
+                       WHERE usuario_id = $1 RETURNING *""",
+                    usuario_id, plano_id, ciclo, inicio, fim,
+                )
     return _serializar(row) if row else None
 
 
@@ -318,31 +341,89 @@ async def atualizar_periodo(usuario_id: str, agora: dt.datetime | None = None) -
         if cancela <= agora:
             return await _set_status(usuario_id, "cancelado", agora)
 
+    # Plano novo JÁ PAGO e o período antigo venceu: este é o momento em que o
+    # item 9 permite trocar. `proximo_pago` é o que separa "a pessoa pagou" de
+    # "a pessoa pediu" — sem essa checagem, um pedido sem pagamento viraria
+    # serviço grátis ao vencer o período, e era esse o bug que a migration 0008
+    # corrige.
+    #
+    # `atualizado_em` volta porque nada aqui é novo: é a mesma linha, com o
+    # plano certo e o período novo aberto a partir de agora.
+    if a.get("plano_proximo") and a.get("proximo_pago"):
+        proximo = cobranca.plano(a["plano_proximo"])
+        ciclo_proximo = a.get("ciclo_proximo") or "mensal"
+        pool = await get_pool()
+        async with pool.acquire() as con:
+            row = await con.fetchrow(
+                """UPDATE assinaturas SET
+                     plano_id = $2, ciclo = $3, status = 'ativo',
+                     inicio_periodo = $4,
+                     fim_periodo = $5,
+                     plano_proximo = NULL, ciclo_proximo = NULL, proximo_pago = false,
+                     cancela_em = NULL, atualizado_em = now()
+                   WHERE usuario_id = $1 AND plano_proximo IS NOT NULL
+                     AND proximo_pago = true
+                     AND (fim_periodo IS NULL OR fim_periodo <= $4)
+                   RETURNING *""",
+                usuario_id, proximo.id, ciclo_proximo, agora,
+                cobranca.fim_do_periodo(agora, ciclo_proximo),
+            )
+        if row is not None:
+            return _serializar(row)
+        # A guarda não pegou: outra leitura já promoveu. Segue para o resto.
+
     if atual.dias_gratis:
         # O teste não vira plano pago sozinho: a troca agendada morre aqui.
+        # Mesma guarda de `_set_status`: só desativa o período que realmente
+        # venceu, para não apagar um pagamento confirmado entre a leitura e cá.
         pool = await get_pool()
         async with pool.acquire() as con:
             row = await con.fetchrow(
                 """UPDATE assinaturas
-                   SET status = 'expirado', plano_proximo = NULL, ciclo_proximo = NULL,
+                   SET status = 'expirado', plano_proximo = NULL, ciclo_proximo = NULL, proximo_pago = false,
                        inicio_periodo = $2, fim_periodo = $2, atualizado_em = now()
-                   WHERE usuario_id = $1 RETURNING *""",
+                   WHERE usuario_id = $1 AND (fim_periodo IS NULL OR fim_periodo <= $2)
+                   RETURNING *""",
                 usuario_id, agora,
             )
+            if row is None:
+                row = await con.fetchrow(
+                    "SELECT * FROM assinaturas WHERE usuario_id = $1",
+                    usuario_id,
+                )
         return _serializar(row)
 
     return await _set_status(usuario_id, "expirado", agora)
 
 
 async def _set_status(usuario_id: str, status: str, agora: dt.datetime) -> dict:
+    """Fecha o período que venceu. Só mexe no período que ainda é o que foi lido.
+
+    O `atualizar_periodo` lê o `fim_periodo` e, fora de transação, escreve o
+    `status`. Se o webhook do gateway confirmasse um pagamento nesse meio-tempo
+    (ele abre o período novo em transação própria), este UPDATE sem guarda
+    sobrescrevia o período recém-pago com `fim_periodo = agora` e devolvia a
+    conta para 'expirado' — cliente tinha pago e ficava sem plano.
+
+    O `AND fim_periodo <= $3` faz a escrita ser no-op quando o período já não é
+    o que o leitor viu. O retorno honesto nesse caso é a linha atualizada, não o
+    vazio de `_serializar`, senão quem chamou lê um `{}` e acha que a conta
+    não tem assinatura.
+    """
     pool = await get_pool()
     async with pool.acquire() as con:
         row = await con.fetchrow(
             """UPDATE assinaturas
                SET status = $2, inicio_periodo = $3, fim_periodo = $3, atualizado_em = now()
-               WHERE usuario_id = $1 RETURNING *""",
+               WHERE usuario_id = $1 AND (fim_periodo IS NULL OR fim_periodo <= $3)
+               RETURNING *""",
             usuario_id, status, agora,
         )
+        if row is None:
+            row = await con.fetchrow(
+                "SELECT * FROM assinaturas WHERE usuario_id = $1",
+                usuario_id,
+            )
     return _serializar(row)
 
 

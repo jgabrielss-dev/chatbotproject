@@ -79,11 +79,19 @@ class Plano:
         return self.preco_mensal / max(self.max_agentes * self.max_mensagens_por_agente_mes, 1) * 1000
 
     def detalhe(self) -> dict:
-        """O plano como vai para o navegador e para os agentes internos."""
+        """O plano como vai para o navegador e para os agentes internos.
+
+        `ordem` é a posição do plano na escada de preços, e ela é pública de
+        propósito: é o que permite ao chat de suporte dizer "isso é um upgrade"
+        ou "isso é um downgrade" sem inventar regra nova. Sem esta chave, todo
+        `get("ordem")` no agente caía no 0 do `.get()` e *qualquer* troca era
+        tratada como upgrade — um downgrade virava cobrança.
+        """
         return {
             "id": self.id,
             "nome": self.nome,
             "descricao": self.descricao,
+            "ordem": self.ordem,
             "preco_mensal": self.preco_mensal,
             "preco_anual": self.preco_anual,
             "max_agentes": self.max_agentes,
@@ -389,7 +397,13 @@ def resumo_para_usuario(assinatura: dict | None, consumo: dict[int, int] | None 
             "plano": proximo.detalhe(),
             "ciclo": assinatura.get("ciclo_proximo") or "mensal",
             "entra_em": assinatura.get("fim_periodo"),
-            "observacao": "O plano novo só começa depois do fim do período já pago.",
+            "pago": bool(assinatura.get("proximo_pago")),
+            "observacao": (
+                "Pagamento confirmado: o plano novo entra no fim do período atual."
+                if assinatura.get("proximo_pago") else
+                "O plano novo só começa depois do fim do período já pago, "
+                "e só se o pagamento for confirmado."
+            ),
         },
         "cancelamento_agendado": assinatura.get("cancela_em"),
         "economia_anual": desconto_anual(atual),

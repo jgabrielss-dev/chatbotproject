@@ -34,7 +34,6 @@ def main() -> None:
 
     email, senha = sys.argv[1], sys.argv[2]
     url = _cred("supabase URL").rstrip("/")
-    pk = _cred("supabase PK")
     origem = {"Origin": ORIGEM, "Referer": ORIGEM + "/"}
     c = httpx.Client(timeout=180, headers=origem)
 

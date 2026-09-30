@@ -167,10 +167,17 @@ DECLARE
   v_role TEXT := 'usuario';
 BEGIN
   SELECT valor INTO v_admins FROM app_config WHERE chave = 'admin_emails';
-  IF v_admins IS NOT NULL AND v_admins <> '' THEN
-    IF lower(v_admins) LIKE '%' || v_email || '%' THEN
-      v_role := 'admin';
-    END IF;
+  -- Casamento por IGUALDADE de item da lista, e nao por `LIKE '%' || email ||
+  -- '%'`. O `LIKE` casava por SUBSTRING: com 'maria@exemplo.com.br' na lista,
+  -- 'maria@exemplo.com' e '@exemplo.com.br' viravam admin — e, pior, um
+  -- cadastro sem e-mail (vazio) casava com '%%' e promoteia qualquer conta a
+  -- admin. Aqui os dois lados sao comparados como lista separada por virgula,
+  -- que e a mesma forma da migration 0004 e da funcao ja aplicada no banco.
+  IF v_email <> ''
+     AND position(',' || v_email || ','
+                  in ',' || lower(replace(coalesce(v_admins, ''), ' ', '')) || ',') > 0
+  THEN
+    v_role := 'admin';
   END IF;
 
   INSERT INTO perfis (id, email, role) VALUES (NEW.id, v_email, v_role)
@@ -296,6 +303,11 @@ CREATE TABLE IF NOT EXISTS assinaturas (
   fim_periodo TIMESTAMPTZ NOT NULL,
   plano_proximo TEXT REFERENCES planos(id),
   ciclo_proximo TEXT CHECK (ciclo_proximo IN ('mensal', 'anual')),
+  -- true quando `plano_proximo` JA FOI PAGO (ver migration 0008). false é o
+  -- pedido sem pagamento, que só vale se houver pagamento. Sem distinguir os
+  -- dois, vencer o período ou dava serviço de graça ou jogava fora o que a
+  -- pessoa tinha pago.
+  proximo_pago BOOLEAN NOT NULL DEFAULT false,
   cancela_em TIMESTAMPTZ,
   criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
   atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()

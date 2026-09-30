@@ -411,7 +411,16 @@ ul.recuperacao li { margin: 2px 0; }
   };
 
   // ---- sessão -----------------------------------------------------------
-  const eu = await Auth.obterSessao();
+  // `obterSessao` rejeita quando o servidor responde 503 ou a rede cai; sem o
+  // `catch`, a rejeição abortava o módulo e o painel ficava preso no gate,
+  // sem abas e sem nenhuma pista do motivo.
+  let eu = null;
+  try {
+    eu = await Auth.obterSessao();
+  } catch (e) {
+    alert(e.message);
+    throw e;
+  }
   if (!eu) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
   if (eu.eh_admin) { location.replace(Auth.pagina("admin")); throw new Error("e admin"); }
   $("euEmail").textContent = eu.nome_exibido || eu.email;
@@ -711,12 +720,13 @@ ul.recuperacao li { margin: 2px 0; }
           </div>
         </div>
         ${c.tipo === "telegram" ? '<button class="btn sm" style="margin-top:8px" data-webhook-tg="' + c.id + '">Registrar webhook</button>' : ""}
-        ${c.tipo === "webhook" ? '<p class="mem mono" style="margin-top:8px;word-break:break-all">URL após salvar</p>' : ""}
+        ${TEM_URL_WEBHOOK[c.tipo] ? '<button class="btn sm" style="margin-top:8px" data-ver-url="' + c.id + '">Ver URL do webhook</button>' : ""}
+        ${c.tipo === "webhook" ? '<p class="mem" style="margin-top:8px">Copie a URL abaixo e aponte o seu sistema para ela.</p>' : ""}
       </div>`).join("")
       : '<p class="vazio">Este agente ainda não tem canal. Crie o primeiro com o botão acima.</p>';
 
     for (const b of $("canais").querySelectorAll("[data-editar-canal]")) {
-      b.onclick = () => abrirFormCanal(
+      b.onclick = () => mostrarFormCanal(
         canaisAgente.find((c) => String(c.id) === b.dataset.editarCanal));
     }
     for (const b of $("canais").querySelectorAll("[data-excluir-canal]")) {
@@ -724,6 +734,9 @@ ul.recuperacao li { margin: 2px 0; }
     }
     for (const b of $("canais").querySelectorAll("[data-webhook-tg]")) {
       b.onclick = () => registrarWebhook(b.dataset.webhookTg);
+    }
+    for (const b of $("canais").querySelectorAll("[data-ver-url]")) {
+      b.onclick = () => mostrarUrl(b.dataset.verUrl);
     }
   }
 
@@ -853,9 +866,10 @@ ul.recuperacao li { margin: 2px 0; }
         // funciona".
         const def = tiposCanal.find((t) => t.id === $("cTipo").value);
         if (def && def.depois_de_salvar) toast(def.depois_de_salvar);
-        if (criado && criado.config && criado.config.secret) {
-          $("urlCanalCriado").innerHTML = urlDoCanal(criado);
-        }
+        // O segredo do webhook NUNCA volta da API (ver `_sem_secrets`), então
+        // não dá para montar a URL aqui. A rota `/webhook-url` devolve a URL
+        // pronta para o próprio dono do canal, que é quem pode usá-la.
+        await mostrarUrl(criado.id, true);
       }
       form.classList.add("hidden");
       await carregarCanais();
@@ -867,12 +881,30 @@ ul.recuperacao li { margin: 2px 0; }
     }
   }
 
-  function urlDoCanal(c) {
-    const base = Auth.API_BASE.replace(/\/api$/, "");
-    const fam = { telegram: "telegram", whatsapp_oficial: "meta/whatsapp",
-                  instagram_oficial: "meta/instagram", webhook: "generico" }[c.tipo];
-    if (!fam || !c.config || !c.config.secret) return "";
-    return `${base}/webhook/${fam}/${c.id}/${c.config.secret}`;
+  // Só estes tipos recebem mensagem por webhook; os demais não têm URL.
+  const TEM_URL_WEBHOOK = { telegram: 1, whatsapp: 1, webhook: 1,
+                            whatsapp_oficial: 1, instagram_oficial: 1 };
+
+  // A URL fica no servidor: o segredo é gerado no backend e nunca volta na
+  // listagem de canais. Só o dono consegue pedir, e só ele usa.
+  async function mostrarUrl(canalId, recemCriado) {
+    if (!canalId) return;
+    try {
+      const r = await api("/api/canais/" + canalId + "/webhook-url");
+      if (!r || !r.url) return;
+      const copiar = () => navigator.clipboard.writeText(r.url)
+        .then(() => toast("URL copiada."))
+        .catch(() => toast("Não consegui copiar: " + r.url));
+      if (recemCriado) {
+        toast("Webhook criado: " + r.url);
+        setTimeout(copiar, 10);
+      } else {
+        toast("URL: " + r.url);
+        setTimeout(copiar, 10);
+      }
+    } catch (e) {
+      if (!recemCriado) toast(e.message, "err");
+    }
   }
 
   async function registrarWebhook(canalId) {

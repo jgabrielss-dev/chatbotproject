@@ -163,7 +163,18 @@
   let fatorNovo = null;     // fator inscrito mas ainda não confirmado
 
   // Já logado? Vai direto para a tela certa, sem passar pelo formulário.
-  const eu = await Auth.obterSessao();
+  // O `try` não é enfeite: `obterSessao` REJEITA quando o servidor não tem
+  // Supabase Auth (503) ou a rede cai, e um `await` sem `catch` nesse ponto
+  // interrompe o módulo inteiro — nenhuma tela era montada e o formulário de
+  // senha, que só existe mais abaixo, nunca aparecia. O usuário ficava numa
+  // página em branco sem nenhuma pista do motivo.
+  let eu = null;
+  try {
+    eu = await Auth.obterSessao();
+  } catch (e) {
+    $("erro").textContent = e.message;
+    return;
+  }
   if (eu) {
     location.replace(Auth.destino(eu));
     return;

@@ -175,11 +175,24 @@ class Midia:
         if tipo not in TIPOS:
             return None
         fonte = d.get("fonte")
+        if not isinstance(fonte, dict) or not fonte:
+            # `fonte` vazia não é um anexo: é um anexo que o Gemini não vai
+            # conseguir ler. O que gravamos no banco sempre vem de
+            # `de_url`/`de_ref`/`de_base64`, que exigem a chave — então
+            # devolver None aqui só afeta o item solto de webhook, e deixa o
+            # `_de_item_solto` cuidar dele como deve ser.
+            #
+            # Antes disto, o `tipo` sozinho bastava: um `{"tipo": "audio",
+            # "mime_type": ..., "ref": ...}` da Meta passava por aqui e virava
+            # `Midia(tipo, fonte={})`. A mensagem era entregue ao modelo como
+            # "[audio do cliente]" e o arquivo sumia — o bot respondia a um
+            # áudio que nunca ouviu.
+            return None
         return Midia(
             tipo=tipo,
             mime=str(d.get("mime") or "application/octet-stream"),
             nome=_limpar_nome(str(d.get("nome") or ""), tipo),
-            fonte=fonte if isinstance(fonte, dict) else {},
+            fonte=fonte,
         )
 
 
@@ -264,13 +277,21 @@ def _de_item_solto(item: dict) -> Midia | None:
         tipo = classificar(str(mime), nome) or ""
     if tipo not in TIPOS:
         return None
+    # Um sticker é uma imagem; a Meta manda `sticker` e o nome não tem pista de
+    # que formato é. Traduzir aqui evita o `return None` logo abaixo.
+    if tipo == "arquivo" and str(mime).startswith("image/"):
+        tipo = "foto"
     base = item.get("base64") or item.get("data") or item.get("conteudo") or ""
     url = item.get("url") or item.get("media_url") or item.get("link") or ""
     if base:
         return de_base64(tipo, str(mime), nome, str(base))
     if url:
         return de_url(tipo, str(mime), nome, str(url))
-    ref = item.get("file_id") or item.get("fileId") or item.get("id") or ""
+    # `ref` é a chave que a Edge Function `inbox` grava, para os canais oficiais
+    # da Meta. Sem ela aqui, todo anexo do WhatsApp/Instagram oficial saía
+    # descartado em silêncio: `_de_item_solto` devolvia None e o bot respondia
+    # a "[imagem do cliente]" sem nunca ver a imagem.
+    ref = item.get("ref") or item.get("file_id") or item.get("fileId") or item.get("id") or ""
     if ref:
         return de_ref(tipo, str(mime), nome or str(ref), str(ref))
     return None

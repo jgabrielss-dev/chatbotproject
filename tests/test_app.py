@@ -3134,6 +3134,344 @@ check("a lista fechada cobre so as chaves de roteamento da Meta",
       repo.CAMPOS_ROTEAMENTO_META == ("phone_number_id", "ig_user_id", "verify_token"),
       str(repo.CAMPOS_ROTEAMENTO_META))
 
+# ==========================================================================
+# CORRECOES DESTA REVISAO
+#
+# Cada bloco abaixo trava um defeito que a revisao encontrou em arquivo que
+# NAO era coberto: o painel do cliente criava canal e quebrava na sequencia
+# (botao "Editar" chamando funcao inexistente, id inexistente no HTML), a
+# Edge Function e o `midia.py` falhavam em falar o mesmo idioma, e o chat de
+# suporte cobrava downgrade como upgrade porque lia uma chave que o dicionario
+# do plano nao tinha.
+# ==========================================================================
+
+def _ids_html(txt):
+    """Todos os `id` declarados no HTML, para comparar com os `$("...")`."""
+    return set(re.findall(r'\bid\s*=\s*"([^"]+)"', txt))
+
+
+def _corpo_js(txt, nome):
+    """O corpo de uma função JS, do nome ate a próxima função do mesmo nível."""
+    i = txt.find(nome)
+    if i < 0:
+        return ""
+    j = txt.find("\n  function ", i + 1)
+    k = txt.find("\n  async function ", i + 1)
+    fim = min(x for x in (j, k, len(txt)) if x > 0)
+    return txt[i:fim]
+
+
+print("\n== correções: o painel do cliente funciona de ponta a ponta ==")
+# O botão "Editar canal" chamava `abrirFormCanal`, que nao existe em lugar
+# nenhum do arquivo: o clique nao fazia NADA, sem toast e sem aviso. E o
+# primeiro `catch` do `innerHTML` de `urlCanalCriado` estourava `null`, o que
+# abortava o `form.classList.add("hidden")` DEPOIS do canal ja gravado — a
+# tela dizia "Erro" e o botao "Criar canal" continuava aberto, pronto para
+# duplicar o canal.
+_painel = painel_cli
+_handlers = set()
+for _attr in ("onclick", "oninput", "onchange", "onkeydown", "onkeyup", "onsubmit"):
+    for _corpo in re.findall(_attr + r'="([^"]*)"', _painel):
+        _handlers.update(re.findall(r"([A-Za-z_$][\w$]*)\s*\(", _corpo))
+for _h in re.findall(r"addEventListener\(\s*['\"][a-z]+['\"]\s*,\s*([A-Za-z_$][\w$]*)", _painel):
+    _handlers.add(_h)
+_definidas = set(re.findall(r"(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)", _painel))
+_ids = _ids_html(_painel)
+for _h in sorted(_handlers):
+    check(f"o painel nao liga um handler que nao existe: {_h}()",
+          _h in _definidas or _h in _ids,
+          "o clique nao faz nada e nao avisa")
+check("o botao 'Editar canal' do painel chama funcao que existe",
+      "abrirFormCanal" not in _painel and "mostrarFormCanal(" in _painel)
+check("o painel nao escreve em elemento que nao existe no HTML",
+      "urlCanalCriado" not in _painel)
+
+print("\n== correções: o admin nao perde o polling do QR ==")
+# `carregarCanais` limpava os timers e nao apagava as chaves. `mostrarQR`
+# so recria o intervalo `if (!timers[c.id])`, entao o intervalo velho (morto)
+# continuava no objeto e o QR parava de atualizar para sempre.
+_carga = _corpo_js(painel_admin, "async function carregarCanais")
+check("carregarCanais apaga a chave do timer, nao so o intervalo",
+      "delete timers" in _carga, "o QR nunca mais atualiza depois de recarregar")
+
+print("\n== correções: o plano diz a ordem que o cobrador usa ==")
+# `cobranca.Plano.detalhe()` nao tinha a chave `ordem`, e o chat de suporte
+# lia `(plano or {}).get("ordem")` — sempre 0. Resultado: `upgrade` era
+# SEMPRE verdadeiro, entao um downgrade pedido no suporte virava uma
+# cobranca pendente e a resposta dizia "Upgrade".
+from app import cobranca as _cob  # noqa: E402
+from app.chat_interno import _ordem_de as _ordem_de_teste  # noqa: E402
+check("detalhe() publica a ordem do plano",
+      "ordem" in _cob.plano("pro").detalhe(),
+      f"sem isso o upgrade vale para qualquer troca: {sorted(_cob.plano('pro').detalhe())}")
+_check_ordem = Path(ROOT / "app" / "chat_interno.py").read_text(encoding="utf-8")
+_i_ordem_chat = _check_ordem.find("async def _acao_mudar_plano")
+_bloco_ordem_chat = _check_ordem[_i_ordem_chat:_i_ordem_chat + 2200]
+# Comentário fora: o bloco documenta o `.get("ordem")` que Removeu.
+_codigo_ordem = re.sub(r"#.*", "", _bloco_ordem_chat)
+check("o chat de suporte nao adivinha a ordem pelo dicionario do plano",
+      '.get("ordem")' not in _codigo_ordem and "_ordem_de(" in _codigo_ordem,
+      "le a ordem do catalogo, que e a unica fonte que a define")
+check("_ordem_de devolve a ordem do catalogo, e nao o 0 do .get()",
+      all(_ordem_de_teste(cid) == ordem for cid, ordem in
+          ((p.id, p.ordem) for p in _cob.CATALOGO)),
+      "qualquer plano lido por id tem de bater com a ordem do catalogo")
+check("o chat de supportive passa pela mesma trava da rota de troca",
+      "pode_trocar_de_plano" in _check_ordem,
+      "sem isso o chat cria um pagamento pendente por mensagem, sem idempotencia")
+
+print("\n== correções: a resposta do Gemini pode nao ter texto ==")
+# `google-genai` tipa `response.text` como Optional e devolve None quando a
+# resposta foi bloqueada por seguranca. `resposta.text.strip()` virava
+# AttributeError, caia no `except` generico e subia "Gemini indisponivel" —
+# o motivo real (bloqueio) sumia do log.
+_fonte_gemini = Path(ROOT / "app" / "ai" / "gemini.py").read_text(encoding="utf-8")
+check("o Gemini trata resposta sem texto (bloqueio de seguranca)",
+      "resposta.text is None" in _fonte_gemini,
+      "AttributeError mascarado como 'modelo indisponivel'")
+check("o motivo do bloqueio fica no log, e nao so 'modelo indisponivel'",
+      "block_reason" in _fonte_gemini,
+      "sem isso nao da pra saber se foi filtro ou quota")
+check("a historico nunca comeca com a mensagem da IA",
+      "de_ia" in _fonte_gemini and "primeira do usuario" in _fonte_gemini.lower()
+      or "while" in _fonte_gemini,
+      "o primeiro turno do Gemini tem de ser do usuario")
+
+print("\n== correções: a resposta 401 também leva CORS ==")
+# O CORS era registrado ANTES do `@app.middleware("http")`, e o Starlette
+# executa o ultimo registrado por fora. Entao o 401 do `exigir_login` saia sem
+# `Access-Control-Allow-Origin`: no GitHub Pages o `fetch` falhava por CORS e
+# o painel dizia "nao foi possivel alcancar a API" em vez de "faca login".
+_fonte_main = src_main
+_i_cors = _fonte_main.find("add_middleware")
+_i_mid = _fonte_main.find('@app.middleware("http")')
+check("o CORS fica por FORA do middleware de login (registrado depois)",
+      _i_cors > _i_mid,
+      "401/403 saem sem cabecalho CORS e o front acusa falha de rede")
+
+print("\n== correções: 'Testar canal' responde para todo tipo ==")
+# Os `if` cobriam telegram/whatsapp/instagram/oficiais. O tipo `webhook`
+# caia no fim da funcao sem `return`: o FastAPI devolvia 200 com corpo
+# `null`, e o JS lia `r.info` de null.
+_fonte_testar = inspect.getsource(main_mod.testar_canal)
+check("testar_canal tem um ramo para o tipo webhook",
+      '"webhook"' in _fonte_testar, "200 com corpo null quebra o painel")
+check("testar_canal nunca devolve None",
+      re.search(r"\n\s*return\s+\{", _fonte_testar.split("except")[-1]) is not None
+      or "sem teste" in _fonte_testar,
+      "sem return final o corpo e null")
+
+# Comportamento, não só presença de texto: `_abrir_periodo_pago` roda de
+# verdade contra um repositório falso que registra os argumentos.
+_rc_cob = "rc_cobranca_mod"
+_Chamadas: list[dict] = []
+
+
+async def _garantir_fake(usuario_id, admin=False):
+    return {"usuario_id": usuario_id, "plano_id": "inicio", "status": "ativo",
+            "ciclo": "mensal", "inicio_periodo": "2026-09-01T00:00:00+00:00",
+            "fim_periodo": "2026-10-01T00:00:00+00:00", "plano_proximo": None,
+            "ciclo_proximo": None, "proximo_pago": False, "cancela_em": None}
+
+
+async def _atualizar_fake(usuario_id, agora=None):
+    return await _garantir_fake(usuario_id)
+
+
+async def _aplicar_fake(usuario_id, plano_id, ciclo, inicio, fim, pagamento_id, adiar=False):
+    _Chamadas.append({"plano": plano_id, "ciclo": ciclo, "inicio": inicio,
+                      "fim": fim, "adiar": adiar})
+    return {}
+
+
+_rc_orig_g = rotas_mod.rc.garantir_assinatura
+_rc_orig_a = rotas_mod.rc.atualizar_periodo
+_rc_orig_p = rotas_mod.rc.aplicar_plano_pago
+try:
+    rotas_mod.rc.garantir_assinatura = _garantir_fake
+    rotas_mod.rc.atualizar_periodo = _atualizar_fake
+    rotas_mod.rc.aplicar_plano_pago = _aplicar_fake
+    asyncio.run(rotas_mod._abrir_periodo_pago(
+        "u1", {"id": 7, "plano_id": "pro", "ciclo": "mensal", "aplicado_em": None}))
+    _adiantado = _Chamadas[-1] if _Chamadas else {}
+    check("pagamento adiantado NAO promove o plano na hora",
+          _adiantado.get("adiar") is True,
+          f"plano gravado: {_adiantado.get('plano')}, adiar={_adiantado.get('adiar')}")
+    check("o periodo pago e estendido ate o fim do que foi pago",
+          str(_adiantado.get("fim", "")).startswith("2026-11-01"),
+          f"fim gravado: {_adiantado.get('fim')}")
+
+    # Período já vencido: aqui a troca pode valer na hora.
+    async def _garantir_vencida(usuario_id, admin=False):
+        return {"usuario_id": usuario_id, "plano_id": "inicio", "status": "expirado",
+                "ciclo": "mensal", "inicio_periodo": "2026-01-01T00:00:00+00:00",
+                "fim_periodo": "2026-02-01T00:00:00+00:00", "plano_proximo": None,
+                "ciclo_proximo": None, "proximo_pago": False, "cancela_em": None}
+    rotas_mod.rc.garantir_assinatura = _garantir_vencida
+    # `atualizar_periodo` também precisa devolver a assinatura vencida: é ele
+    # quem avalia a virada, e a linha que a rota lê é a que ele devolve.
+    async def _atualizar_vencida(usuario_id, agora=None):
+        return await _garantir_vencida(usuario_id)
+    rotas_mod.rc.atualizar_periodo = _atualizar_vencida
+    asyncio.run(rotas_mod._abrir_periodo_pago(
+        "u1", {"id": 8, "plano_id": "pro", "ciclo": "mensal", "aplicado_em": None}))
+    _vencido = _Chamadas[-1]
+    check("periodo ja vencido promove na hora",
+          _vencido.get("adiar") is False and _vencido.get("plano") == "pro",
+          f"chamada: {_vencido}")
+
+    # Já aplicado: sai cedo e não chama nada (idempotência do webhook).
+    _antes = len(_Chamadas)
+    asyncio.run(rotas_mod._abrir_periodo_pago(
+        "u1", {"id": 7, "plano_id": "pro", "ciclo": "mensal", "aplicado_em": "2026-01-01"}))
+    check("pagamento ja aplicado nao abre periodo de novo",
+          len(_Chamadas) == _antes, "duas notificacoes estenderiam o periodo duas vezes")
+finally:
+    rotas_mod.rc.garantir_assinatura = _rc_orig_g
+    rotas_mod.rc.atualizar_periodo = _rc_orig_a
+    rotas_mod.rc.aplicar_plano_pago = _rc_orig_p
+
+check("a virada do periodo promove o plano que JA foi pago",
+      "proximo_pago" in inspect.getsource(rc_cobranca_mod.atualizar_periodo),
+      "pedido sem pagamento nunca vira plano")
+check("so o plano pago e promovido, o pedido simples nao",
+      "and a.get(\"proximo_pago\")" in inspect.getsource(rc_cobranca_mod.atualizar_periodo)
+      or 'a.get("proximo_pago")' in inspect.getsource(rc_cobranca_mod.atualizar_periodo),
+      "venceu o periodo e o plano pedido entrava sem pagamento")
+check("o resumo diz se a troca agendada ja foi paga",
+      '"pago": bool(' in inspect.getsource(cob),
+      "a tela precisa distinguir 'pediu' de 'pagou'")
+check("a migration 0008 cria a coluna que distingue pago de pedido",
+      "proximo_pago" in (ROOT / "supabase" / "migrations" / "0008_proximo_pago.sql")
+      .read_text(encoding="utf-8"),
+      "base nova precisa da coluna")
+check("o bootstrap do banco tambem tem a coluna",
+      "proximo_pago" in Path(ROOT / "sql" / "schema.sql").read_text(encoding="utf-8"),
+      "init_db.py aplica o schema.sql, nao as migrations")
+
+print("\n== correções: plano pago não vira regra antes da hora ==")
+# `_abrir_periodo_pago` calculava `inicio = fim_periodo` (futuro) quando o
+# cliente pagou adiantado, e `aplicar_plano_pago` escrevia `plano_id` na mesma
+# hora. O item 9 pede o contrário: "preço e regras mudam só no fim do período já
+# pago". O efeito era um período em que o cliente tinha `inicio_periodo` no
+# futuro e já servia com as regras do plano novo — e o `resumo` ainda mostrava
+# a data antiga, então a tela e o limite divergiam.
+_fonte_pagar = inspect.getsource(rotas_mod._abrir_periodo_pago)
+check("pagamento adiantado nao promove o plano antes da hora",
+      "plano_proximo" in _fonte_pagar or "_agendar" in _fonte_pagar,
+      "o plano novo so entra em vigor quando o periodo pago comeca")
+check("a data exibida no resumo e a do plano que esta valendo",
+      'inicio_periodo": assinatura.get("inicio_periodo")' in inspect.getsource(cob),
+      "a tela precisa dizer quando o plano novo comeca")
+
+print("\n== correções: a virada do período não apaga o que foi pago ==")
+# `atualizar_periodo` lia o `fim_periodo` e, fora de transacao, escrevia
+# `status/fim_periodo`. Se o webhook do gateway abrisse o periodo novo entre a
+# leitura e a escrita, o `_set_status` sobrescrevia o periodo recem-pago e o
+# cliente ficava 'expirado' tendo pago.
+_fonte_rc = Path(ROOT / "app" / "repos_cobranca.py").read_text(encoding="utf-8")
+_i_set = _fonte_rc.find("async def _set_status")
+_bloco_set = _fonte_rc[_i_set:_i_set + 700]
+check("so expira o período que realmente venceu",
+      "fim_periodo <=" in _bloco_set,
+      "sem a guarda, uma leitura concorrente apaga o periodo recem-pago")
+check("a expiracao nao mexe no plano nem no ciclo",
+      "plano_id" not in _bloco_set.split("RETURNING")[0],
+      "so status e data; plano e ciclo ficam como estao")
+
+print("\n== correções: a Edge Function e o midia.py falam a mesma língua ==")
+# A Edge Function gravava o identificador do anexo em `ref` e `midia.py`
+# so lia `file_id`/`fileId`/`id`. Como `ref` nao era lido E o item nao tinha
+# base64 nem url, `_de_item_solto` caia no `return None`: todo anexo do
+# WhatsApp oficial era DESCARTADO em silencio — o bot respondia a
+# "[imagem do cliente]" sem nunca ver a imagem, e o cliente achava que era bug.
+from app import midia as _midia  # noqa: E402
+_fonte_ts = Path(ROOT / "supabase" / "functions" / "inbox" / "index.ts").read_text(
+    encoding="utf-8")
+_fonte_midia = inspect.getsource(_midia._de_item_solto)
+check("a Edge Function entrega o identificador do anexo em `ref`",
+      '"ref"' in _fonte_ts,
+      "o backend precisa ler a mesma chave para nao descartar o arquivo")
+check("midia.py le `ref`, a chave que a Edge Function escreve",
+      '"ref"' in _fonte_midia,
+      "sem isso todo anexo oficial vira lista vazia")
+for _nome, _item in (
+    ("foto do WhatsApp oficial",
+     {"tipo": "imagem", "mime_type": "image/jpeg", "filename": "f.jpg", "ref": "M1"}),
+    ("documento do WhatsApp oficial",
+     {"tipo": "documento", "mime_type": "application/pdf", "filename": "d.pdf", "ref": "D1"}),
+    ("audio do WhatsApp oficial",
+     {"tipo": "audio", "mime_type": "audio/ogg", "filename": "a.ogg", "ref": "A1"}),
+    ("video do WhatsApp oficial",
+     {"tipo": "video", "mime_type": "video/mp4", "filename": "v.mp4", "ref": "V1"}),
+    ("sticker do WhatsApp oficial",
+     {"tipo": "sticker", "mime_type": "image/webp", "filename": "s.webp", "ref": "S1"}),
+):
+    _saida = _midia.normalizar([_item])
+    check(f"o anexo nao se perde: {_nome}",
+          len(_saida) == 1 and bool(_saida[0].fonte),
+          f"virou {[(m.tipo, m.fonte) for m in _saida] or 'lista vazia (descartado)'}")
+    check(f"o anexo tem bytes para o Gemini ler: {_nome}",
+          bool(_saida) and _midia.orcamento(_saida)[0] == _saida,
+          "orcamentodrops o anexo antes de chegar no modelo")
+check("midia.py continua aceitando o formato antigo (Telegram/Meta por id)",
+      len(_midia.normalizar([{"tipo": "video", "file_id": "V9"}])) == 1,
+      "a correcao nao pode quebrar o Telegram")
+
+print("\n== correções: o bootstrap do banco promove admin do jeito certo ==")
+# `sql/schema.sql` (o caminho de `scripts/init_db.py`) usava
+# `LIKE '%' || email || '%'`; a migration 0004 usa `position(..., ',') > 0`.
+# Com `admin_emails` = 'maria@y.com.br' e e-mail 'maria@y.com' (ou e-mail
+# vazio, num cadastro por telefone) o LIKE promove a admin quem nao e.
+_fonte_schema = Path(ROOT / "sql" / "schema.sql").read_text(encoding="utf-8")
+_i_gg = _fonte_schema.find("CREATE OR REPLACE FUNCTION public.criar_perfil()")
+_bloco_gg = _fonte_schema[_i_gg:_i_gg + 1400]
+# O `LIKE` do comentario que explica o problema nao conta: o que nao pode
+# sobrar e um `LIKE` em CODIGO, entao o comentario sai do caminho.
+_codigo_gg = re.sub(r"--[^\n]*", "", _bloco_gg)
+check("o bootstrap nao promove admin por substring",
+      "LIKE" not in _codigo_gg.upper() and "position(" in _codigo_gg,
+      "e-mail vazio casa com '%%' e promove qualquer conta")
+check("o bootstrap exige e-mail nao vazio para virar admin",
+      "email_novo <> ''" in _bloco_gg or "v_email <> ''" in _bloco_gg,
+      "cadastro sem e-mail viraria admin")
+
+print("\n== correções: nada de busca de anexo em URL arbitrária ==")
+# A Evolution entrega a URL do arquivo no webhook; o `evolution.baixar_anexo`
+# fazia `http.get(url)` sem allowlist e sem a protecao de SSRF que o
+# pipeline tem. Quem controlasse o payload mandava o servidor buscar
+# `http://169.254.169.254/...` de dentro da rede do Render.
+_fonte_evo = Path(ROOT / "app" / "channels" / "evolution.py").read_text(encoding="utf-8")
+_i_baixar = _fonte_evo.find("async def baixar_anexo")
+_bloco_baixar = _fonte_evo[_i_baixar:].split("\nasync def ", 1)[0]
+check("baixar_anexo da Evolution valida o host antes do GET",
+      "_ip_publico" in _bloco_baixar or "_url_publica" in _bloco_baixar
+      or "HOSTS_PERMITIDOS" in _bloco_baixar,
+      "SSRF: o servidor busca qualquer URL que vier no payload")
+check("baixar_anexo da Evolution confere o status da resposta",
+      "raise_for_status" in _bloco_baixar,
+      "sem isso a Evolution fora do ar vira 'desconectado' na tela")
+
+print("\n== correções: a Edge Function aceita o webhook sem JWT ==")
+# A Meta manda o POST sem Authorization. Com `verify_jwt` no padrao (true) a
+# funcao responde 401 e o canal oficial nao recebe mensagem nenhuma — e o
+# repo nao registrava isso, entao um deploy novo nascia quebrado.
+_conf = Path(ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+check("config.toml declara a inbox sem exigir JWT",
+      "[functions.inbox]" in _conf and "verify_jwt = false" in _conf,
+      "a Meta e o Telegram chamam a funcao sem token")
+
+print("\n== correções: obterSessao rejeitada não derruba a tela ==")
+# `await Auth.obterSessao()` sem try: um token velho com o Render frio faz a
+# promise REJEITAR e tudo abaixo da linha deixa de rodar — sem abas, sem
+# formulario e, na tela de login, com a senha indo para a URL no submit.
+for _nome_arq, _txt_arq in (("login.html", login), ("admin.html", painel_admin),
+                           ("painel.html", painel_cli)):
+    _moch = re.search(r"await Auth\.obterSessao\(\)", _txt_arq)
+    check(f"{_nome_arq} trata a rejeicao de obterSessao",
+          _moch is None or "try" in _txt_arq[max(0, _moch.start() - 400):_moch.start()],
+          "a promise rejeitada mata todo o resto do script")
+
 # --------------------------------------------------------------------------
 print("\n== resumo ==")
 if falhas:

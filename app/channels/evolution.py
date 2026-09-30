@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import httpx
 
+#: teto de um anexo, o mesmo que o `midia` aplica aos outros canais.
+_LIMITE_ARQUIVO = 15 * 1024 * 1024
+
 
 WEBHOOK_EVENTOS = ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE"]
 
@@ -147,7 +150,7 @@ async def listar_mensagens(
     return saidas
 
 
-def extrair_mensagem(payload: dict) -> tuple[str | str | None, str | None, dict | None]:
+def extrair_mensagem(payload: dict) -> tuple[str | None, str | None, dict | None]:
     """Retorna (texto, remoteJid, dados) de um evento MESSAGES_UPSERT."""
     evento = (payload.get("event") or "").upper().replace(".", "_")
     if evento != "MESSAGES_UPSERT":
@@ -189,6 +192,12 @@ def extrair_anexo(dados: dict) -> dict | None:
     configuração `ALLOW_BASE64`/`BASE64_MEDIA` do Baileys). A segunda é
     guardada inteira no `payload_json` de qualquer forma, então não há custo
     novo em referenciá-la aqui.
+
+    `legenda` é o texto que o cliente escreveu junto do arquivo ("isso aqui
+    quebrou"), e é o que a pessoa quer que o agente leia: sem ela, a única coisa
+    que sobra é "[foto] IMG.jpg", e o agente responde sobre a imagem em vez de
+    sobre o problema. `Midia.de_dict` ignora a chave — ela serve só ao webhook,
+    que a usa como texto da mensagem.
     """
     msg = (dados or {}).get("message") or {}
     for campo, tipo in _CAMPO_EVOLUTION:
@@ -198,13 +207,15 @@ def extrair_anexo(dados: dict) -> dict | None:
         nome = (corpo.get("fileName") or corpo.get("fileEncSha256")
                 or corpo.get("mimetype") or f"{campo}")
         mime = corpo.get("mimetype") or ""
+        legenda = corpo.get("caption") if isinstance(corpo.get("caption"), str) else ""
         base64_ = (corpo.get("media") or corpo.get("base64") or "")
         url = corpo.get("mediaUrl") or corpo.get("url") or corpo.get("link") or ""
         if base64_:
             return {"tipo": tipo, "mime": mime, "nome": nome,
-                    "fonte": {"base64": base64_}}
+                    "fonte": {"base64": base64_}, "legenda": legenda or ""}
         if url:
-            return {"tipo": tipo, "mime": mime, "nome": nome, "fonte": {"url": url}}
+            return {"tipo": tipo, "mime": mime, "nome": nome,
+                    "fonte": {"url": url}, "legenda": legenda or ""}
     return None
 
 
@@ -215,14 +226,42 @@ async def baixar_anexo(instancia: str, ref: str) -> tuple[str, bytes]:
     pública e não expira) e o `mediaUrl` que veio no webhook. Aqui o `ref` é a
     própria URL — quem a entrega é o `extrair_anexo` acima, via `fonte["url"]`,
     e esta função existe para quando o Evolution manda o id no lugar da URL.
+
+    A URL vem do webhook, ou seja, de QUEM CHAMA o canal, e por isso passa pela
+    mesma prova de `pipeline._url_publica` que já protege o caminho de `url`:
+    resolver o host e recusar rede privada antes do GET. Sem isso, o Evolution
+    podia ser instruído a devolver `mediaUrl` apontando para `169.254.169.254` e
+    o Render entregaria os metadados da máquina como se fosse uma foto. Cada
+    redirect é conferido de novo, e o download é cortado em
+    `midia.LIMITE_POR_ARQUIVO` para não transformar o plano grátis em RAM
+    pública.
     """
+    # Só a prova de URL: o download em si é o daqui, porque a Evolution devolve
+    # um arquivo só e a leitura precisa acontecer já. O import é tardio porque
+    # `pipeline` importa este módulo.
+    from app.pipeline import _url_publica
+
     if not instancia:
         raise RuntimeError("canal de WhatsApp sem instance_name")
     url = ref if ref.startswith("http") else ""
     if not url:
         raise RuntimeError("Evolution nao devolveu mediaUrl para o arquivo")
-    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as http:
-        resposta = await http.get(url)
-    resposta.raise_for_status()
-    mime = str(resposta.headers.get("content-type") or "application/octet-stream")
-    return mime.split(";")[0], resposta.content
+    destino = await _url_publica(url)
+    async with httpx.AsyncClient(timeout=90, follow_redirects=False) as http:
+        for _ in range(4):
+            async with http.stream("GET", destino) as resposta:
+                if resposta.is_redirect:
+                    lugar = resposta.headers.get("location") or ""
+                    if not lugar:
+                        raise RuntimeError("redirect sem destino")
+                    destino = await _url_publica(str(httpx.URL(destino).join(lugar)))
+                    continue
+                resposta.raise_for_status()
+                mime = str(resposta.headers.get("content-type") or "application/octet-stream")
+                dados = bytearray()
+                async for pedaco in resposta.aiter_bytes():
+                    dados.extend(pedaco)
+                    if len(dados) > _LIMITE_ARQUIVO:
+                        raise RuntimeError("arquivo grande demais para o plano")
+                return mime.split(";")[0], bytes(dados)
+    raise RuntimeError("redirect demais ao baixar o arquivo")

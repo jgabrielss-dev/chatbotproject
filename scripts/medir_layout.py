@@ -759,7 +759,9 @@ def _conferir_abas_do_painel(cdp: _Cdp) -> list[str]:
 
     # A aba Canais e o item 2: precisa listar os canais do agente escolhido e
     # oferecer o formulario (que so existe depois de /api/painel/canais/tipos).
-    canais = cdp.avaliar("""(() => {
+    # O retorno não é usado: o que importa aqui é o CLIQUE na aba, que dispara a
+    # renderização dos canais antes da medição seguinte.
+    cdp.avaliar("""(() => {
         document.querySelector('[data-tela="canais"]').click();
         return true;
     })()""")

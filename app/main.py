@@ -884,15 +884,6 @@ async def asset_style_css():
 async def asset_chat_js():
     return FileResponse(CHAT_JS, media_type="application/javascript")
 
-# A pagina tambem pode ser hospedada no GitHub Pages, entao liberamos CORS
-# para que o navegador consiga chamar esta API de outra origem.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Rotas publicas: a home de venda, o login, as telas de painel (sao so o shell
 # do HTML; os dados exigem conta), o health check do Render, a config do front e
 # os webhooks, que tem segredo proprio na propria rota. TODO o resto exige
@@ -937,9 +928,7 @@ def _eh_publica(caminho: str) -> bool:
     # de login, porque a URL que o front construia nao existia aqui.
     if caminho.endswith("/") and caminho[:-1] in _ROTAS_PUBLICAS:
         return True
-    if caminho.endswith(".html") and caminho[: -len(".html")] in _ROTAS_PUBLICAS:
-        return True
-    return False
+    return caminho.endswith(".html") and caminho[: -len(".html")] in _ROTAS_PUBLICAS
 
 
 @app.middleware("http")
@@ -998,6 +987,20 @@ async def exigir_login(request: Request, call_next):
                             headers=e.headers or None)
     request.state.usuario = usuario
     return await call_next(request)
+
+
+# O CORS fica registrado DEPOIS do `exigir_login` de propósito. O Starlette
+# executa o último middleware registrado por fora, então a ordem importa: com o
+# CORS aqui dentro, o 401 do `exigir_login` saía sem
+# `Access-Control-Allow-Origin`. No GitHub Pages o navegador bloqueia a
+# resposta por CORS e o painel acusava "não foi possível alcançar a API",
+# escondendo o motivo real — "sua sessão expirou, faça login de novo".
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/", include_in_schema=False)
@@ -1162,7 +1165,10 @@ async def webhook_telegram(canal_id: int, secret: str, request: Request):
         # `origem` nunca pode ser degenerada: o índice único é
         # (canal_id, origem), então "tg:None" faria TODAS as mensagens
         # seguintes deste canal colidirem entre si e serem descartadas em
-        # silêncio. Sem id de evento não há deduplicação possível -> 400.
+        # silêncio. Sem id de evento não há deduplicação possível e a mensagem
+        # é ignorada com 200 (e não 400): o Telegram reenviaria o mesmo update
+        # por 24 h atrás de uma resposta que não muda nada. A Edge Function,
+        # que é o caminho normal, cai no hash do corpo em vez de recusar.
         await repo.salvar_na_caixa(
             canal_id, chat_id, _texto_da_mensagem(texto) or midia.descrever(anexo),
             origem=f"tg:{update_id}",
@@ -1675,8 +1681,15 @@ async def testar_canal(canal_id: int, request: Request):
         if canal["tipo"] in TIPOS_CANAL_OFICIAL:
             info = await meta_oficial.verificar(cfg, canal["tipo"])
             return {"ok": True, "info": f"{info} (oficial)"}
+        if canal["tipo"] == "webhook":
+            # Não existe serviço externo para consultar: o canal funciona quando
+            # o outro lado posta na URL. Sem este ramo a função caía no fim sem
+            # `return` e o FastAPI devolvia 200 com o corpo `null`, que o
+            # painel lia como `r.info` de null.
+            return {"ok": True, "info": "URL ativa · sem teste de resposta"}
     except Exception as e:
         raise HTTPException(400, f"Falha no teste: {e}")
+    return {"ok": False, "info": "Ainda não dá para testar este canal; salve-o primeiro."}
 
 
 # --------------------------------------------------------------------------
