@@ -241,10 +241,23 @@ async def aplicar_plano_pago(
     grande, com a cota do pequeno) ou o inverso (cota grande, período
     expirado). `aplicado_em` no pagamento vai na mesma trans para que o
     gateway nunca pague duas vezes pelo mesmo registro.
+
+    A trava é `AND aplicado_em IS NULL`, e é a PRIMEIRA escrita da transação: se
+    o pagamento já foi aplicado, nada é tocado (devolve None) e a assinatura
+    fica como está. Sem isto, duas confirmações simultâneas do mesmo pagamento
+    (webhook do MP + polling do navegador) estendiam o período duas vezes — dois
+    meses por um PIX.
     """
     pool = await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
+            marcado = await con.fetchrow(
+                """UPDATE pagamentos SET aplicado_em = now()
+                   WHERE id = $1 AND aplicado_em IS NULL RETURNING id""",
+                pagamento_id,
+            )
+            if not marcado:
+                return None
             row = await con.fetchrow(
                 """UPDATE assinaturas SET
                      plano_id = $2, ciclo = $3, status = 'ativo',
@@ -254,11 +267,7 @@ async def aplicar_plano_pago(
                    WHERE usuario_id = $1 RETURNING *""",
                 usuario_id, plano_id, ciclo, inicio, fim,
             )
-            await con.execute(
-                "UPDATE pagamentos SET aplicado_em = now() WHERE id = $1",
-                pagamento_id,
-            )
-    return _serializar(row)
+    return _serializar(row) if row else None
 
 
 async def atualizar_periodo(usuario_id: str, agora: dt.datetime | None = None) -> dict | None:
@@ -356,6 +365,28 @@ async def obter_pagamento(pagamento_id: int) -> dict | None:
     return _serializar(row) if row else None
 
 
+async def pagamento_pendente_equivalente(
+    usuario_id: str, plano_id: str, ciclo: str,
+) -> dict | None:
+    """Pagamento pendente da mesma conta para o mesmo plano e ciclo.
+
+    É o que faz `POST /api/plano/troca` ser idempotente: o segundo clique no
+    mesmo botão reencontra o pagamento que o primeiro criou, em vez de abrir
+    outro. Sem isso, dez cliques dez pagamentos pagáveis — e, com o gateway
+    ligado, dez PIX para o mesmo mês.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """SELECT * FROM pagamentos
+                WHERE usuario_id = $1 AND plano_id = $2 AND ciclo = $3
+                  AND status = 'pendente'
+                ORDER BY id DESC LIMIT 1""",
+            usuario_id, plano_id, cobranca.normalizar_ciclo(ciclo),
+        )
+    return _serializar(row) if row else None
+
+
 async def listar_pagamentos(usuario_id: str, limite: int = 20) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as con:
@@ -385,19 +416,32 @@ async def guardar_checkout_pix(
     referencia_mp: str,
     qr_code: str,
     expira_em: dt.datetime | str | None = None,
+    valor: float | None = None,
 ) -> None:
     """Grava os dados do PIX gerado no provedor no pagamento pendente.
 
     O `qr_code` guardado é o texto "copia e cola" (pequeno e reexibível); a
     imagem base64 é pesada e fica só na resposta do checkout.
+
+    `valor` é o que o checkout realmente mandou ao gateway, para a conferência
+    de valor na confirmação não depender de uma coluna escrita antes do pedido.
     """
     pool = await get_pool()
     async with pool.acquire() as con:
+        if valor is None:
+            await con.execute(
+                """UPDATE pagamentos
+                   SET metodo = 'pix', referencia = $2, qr_code = $3, expira_em = $4
+                   WHERE id = $1 AND status = 'pendente'""",
+                pagamento_id, referencia_mp, qr_code, expira_em,
+            )
+            return
         await con.execute(
             """UPDATE pagamentos
-               SET metodo = 'pix', referencia = $2, qr_code = $3, expira_em = $4
+               SET metodo = 'pix', referencia = $2, qr_code = $3, expira_em = $4,
+                   valor = $5
                WHERE id = $1 AND status = 'pendente'""",
-            pagamento_id, referencia_mp, qr_code, expira_em,
+            pagamento_id, referencia_mp, qr_code, expira_em, float(valor),
         )
 
 
@@ -411,7 +455,19 @@ async def definir_metodo(pagamento_id: int, metodo: str) -> None:
         )
 
 
-async def marcar_pagamento_pago(pagamento_id: int, referencia: str = "") -> dict:
+async def marcar_pagamento_pago(pagamento_id: int, referencia: str = "") -> tuple[dict | None, bool]:
+    """Marca o pagamento como pago. Devolve `(linha, fez_a_transicao)`.
+
+    O segundo valor é a trava contra período duplicado. O UPDATE só afeta
+    pagamento ainda `pendente`, então de duas confirmações simultâneas do mesmo
+    pagamento (webhook do MP + polling do navegador) uma recebe True e a outra
+    False — e só a que recebeu True abre o período. Antes, as duas abriam.
+
+    Devolve `({}, False)` quando o pagamento não existe: a leitura é feita
+    dentro do mesmo bloco da conexão, porque usar `con` depois do
+    `async with` levanta `InterfaceError` do asyncpg (a conexão já voltou para
+    o pool) — o que fazia a confirmação idempotente estourar 500.
+    """
     pool = await get_pool()
     async with pool.acquire() as con:
         row = await con.fetchrow(
@@ -421,9 +477,10 @@ async def marcar_pagamento_pago(pagamento_id: int, referencia: str = "") -> dict
                WHERE id = $1 AND status = 'pendente' RETURNING *""",
             pagamento_id, referencia,
         )
-    if not row:
+        if row:
+            return _serializar(row), True
         row = await con.fetchrow("SELECT * FROM pagamentos WHERE id = $1", pagamento_id)
-    return _serializar(row)
+    return (_serializar(row) if row else None), False
 
 
 # --------------------------------------------------------------------------

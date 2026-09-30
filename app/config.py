@@ -9,6 +9,33 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _verdadeiro(valor: str | None) -> bool:
+    """'1', 'true', 'sim', 'yes' (sem diferenciar maiúsculas) são verdadeiro.
+
+    Qualquer outra coisa — inclusive string vazia, que é o padrão de um flag de
+    segurança — é falso. O padrão desligado é o que protege; por isso não
+    existe aqui nenhum caso que "pareça verdadeiro".
+    """
+    return str(valor or "").strip().lower() in ("1", "true", "sim", "yes")
+
+
+def _ler_isentas(valor: str | None) -> frozenset[str]:
+    """Lista de e-mails isentos, normalizada.
+
+    Aceita vírgula, ponto e vírgula, espaço e quebra de linha como separador.
+    Só com `split(",")`, um valor escrito como `a@x.com b@y.com` (separado por
+    espaço, o jeito mais natural de digitar dois e-mails) virava UMA entrada,
+    `a@x.com b@y.com`, que não bate com nenhum e-mail: a isenção sumia em
+    silêncio e a conta do dono passava a ser barrada por cota no meio da
+    operação.
+    """
+    return frozenset(
+        e.strip().lower()
+        for e in re.split(r"[,\s;]+", str(valor or ""))
+        if e.strip()
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -80,15 +107,19 @@ class Settings:
     # E-mails que NUNCA precisam pagar: o dono/operador da plataforma e a
     # conta de teste. Quem está na lista recebe o plano máximo sem checkout —
     # é a garantia de que a operação própria não fica trancada atrás do
-    # próprio funil de cobrança.
-    contas_isentas: frozenset[str] = frozenset(
-        e.strip().lower()
-        for e in os.getenv(
-            "CONTAS_ISENTAS",
-            "joaogabrielss.2007@gmail.com,jgkwy07@gmail.com",
-        ).split(",")
-        if e.strip()
+    # próprio funil de cobrança. A leitura é feita por `_ler_isentas` (aceita
+    # vírgula, ponto e vírgula, espaço e quebra de linha) para que a regra
+    # exista uma única vez e possa ser testada sozinha.
+    contas_isentas: frozenset[str] = _ler_isentas(
+        os.getenv("CONTAS_ISENTAS", "joaogabrielss.2007@gmail.com,jgkwy07@gmail.com")
     )
+
+    # Confirmação de pagamento sem gateway (dev local / teste de interface).
+    # Desligado por padrão DE PROPÓSITO: `/api/plano/pagamento/{id}/pagar` é o
+    # botão que abre o período, então ligá-lo num ambiente que só esqueceu de
+    # cadastrar o PAT do Mercado Pago entregaria plano pago de graça para
+    # qualquer conta logada, com um clique. Para ligar, é preciso escrever.
+    pagamento_demo: bool = _verdadeiro(os.getenv("PAGAMENTO_DEMO", ""))
 
     # Token de acesso do painel admin. OPCIONAL e fora do fluxo normal de login:
     # serve só como vidro quebrado de emergência, para recuperar o acesso se o

@@ -819,15 +819,7 @@ ul.recuperacao li { margin: 2px 0; }
     if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
     const ativo = $("cAtivo").value === "true";
     const config = coletarConfig(form);
-    if (editandoCanal) {
-      const tipo = tiposCanal.find((t) => t.id === editandoCanal.tipo);
-      for (const campo of (tipo ? tipo.campos : [])) {
-        if (campo.obrigatorio && !config[campo.chave] && editandoCanal.config[campo.chave] === "********") {
-          toast(`Preencha ${campo.rotulo}: o valor guardado não volta para o navegador, por segurança.`, "err");
-          return;
-        }
-      }
-    } else {
+    if (!editandoCanal) {
       const tipo = $("cTipo").value;
       const def = tiposCanal.find((t) => t.id === tipo);
       for (const campo of (def ? def.campos : [])) {
@@ -837,6 +829,11 @@ ul.recuperacao li { margin: 2px 0; }
         }
       }
     }
+    // Editando NÃO se exige a credencial: o servidor (`mesclar_config_sync`)
+    // mantém o valor guardado quando o campo chega vazio ou como "********".
+    // Antes desta regra, renomear um canal de WhatsApp oficial exigia colar de
+    // novo o access token da Meta — ou o botão "Salvar" simplesmente não
+    // fazia nada, sem dizer por quê.
     btn.disabled = true;
     try {
       if (editandoCanal) {

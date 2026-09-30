@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import socket
+from urllib.parse import urlsplit
 
 from app import midia
 from app import repositories as repo
@@ -15,6 +18,95 @@ log = logging.getLogger("pipeline")
 #: numa conexão lenta é lento. Cortar antes de terminar é jogar a mensagem fora.
 TIMEOUT_ANEXO_SEG = 90.0
 
+#: Quantos redirects de anexo são perseguidos. Cada hop é conferido de novo, e
+#: três já cobrem CDN de link encadeado sem dar para redirecionar em círculo.
+MAX_REDIRECIONAMENTOS = 3
+
+
+def _ip_publico(ip: str) -> bool:
+    """Este endereço é da internet aberta?"""
+    try:
+        end = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (
+        end.is_private or end.is_loopback or end.is_link_local or end.is_reserved
+        or end.is_multicast or end.is_unspecified
+    )
+
+
+async def _url_publica(url: str) -> str:
+    """Devolve a URL só depois de provar que ela aponta para a internet.
+
+    O caminho de `url` recebe a URL de QUEM CHAMOU o webhook: qualquer conta
+    logada cria um canal `webhook` (que não é bloqueado por tipo), tem o
+    segredo e manda `{"anexos": [{"url": "http://169.254.169.254/..."}]}`. Sem
+    esta conferência o servidor busca a rede interna dele — metadados da nuvem,
+    banco, Evolution API — e o conteúdo volta como texto para o Gemini e para a
+    resposta: isso é exfiltração, não download de arquivo.
+
+    O teste é no IP resolvido, não no nome: `http://localhost` e
+    `http://127.0.0.1.nip.io` passam por qualquer allowlist de host.
+    """
+    bruto = str(url or "")
+    try:
+        partes = urlsplit(bruto)
+    except ValueError:
+        raise ValueError("url invalida") from None
+    if partes.scheme not in ("http", "https"):
+        raise ValueError("anexo por url precisa ser http ou https")
+    host = partes.hostname or ""
+    if not host:
+        raise ValueError("url sem host")
+    if _ip_publico(host):
+        return bruto
+    porta = partes.port or (443 if partes.scheme == "https" else 80)
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, porta, type=socket.SOCK_STREAM,
+        )
+    except OSError as e:
+        raise ValueError("host do anexo nao resolveu") from e
+    if not infos or not all(_ip_publico(info[4][0]) for info in infos):
+        raise ValueError("anexo nao pode vir da rede interna")
+    return bruto
+
+
+async def _baixar_url(url: str, mime_esperado: str) -> tuple[str, bytes]:
+    """Baixa uma URL de anexo, conferindo cada redirect e cortando no limite.
+
+    Ler a resposta inteira antes de olhar o tamanho (`.content`) é o que permite
+    que uma URL de alguns gigabytes vire o mesmo tanto de RAM no plano grátis do
+    Render: o limite existe em `_resolver_anexos`, mas só depois do download.
+    """
+    import httpx
+
+    limite = midia.LIMITE_POR_ARQUIVO
+    destino = await _url_publica(url)
+    async with httpx.AsyncClient(
+        timeout=TIMEOUT_ANEXO_SEG, follow_redirects=False,
+    ) as http:
+        for _ in range(MAX_REDIRECIONAMENTOS + 1):
+            async with http.stream("GET", destino) as resposta:
+                if resposta.is_redirect:
+                    lugar = resposta.headers.get("location") or ""
+                    if not lugar:
+                        raise ValueError("redirect sem destino")
+                    destino = await _url_publica(str(httpx.URL(destino).join(lugar)))
+                    continue
+                resposta.raise_for_status()
+                dados = bytearray()
+                async for pedaco in resposta.aiter_bytes():
+                    dados.extend(pedaco)
+                    if len(dados) > limite:
+                        raise ValueError("arquivo maior que o limite")
+                mime = (
+                    str(resposta.headers.get("content-type") or mime_esperado)
+                    .split(";")[0].strip() or mime_esperado
+                )
+                return mime, bytes(dados)
+    raise ValueError("excesso de redirecionamento no link do anexo")
+
 
 async def _baixar_anexo(canal: dict, m: midia.Midia) -> tuple[str, bytes]:
     """Baixa os bytes de um anexo, usando as credenciais do canal.
@@ -27,9 +119,10 @@ async def _baixar_anexo(canal: dict, m: midia.Midia) -> tuple[str, bytes]:
     - `ref` precisa do token do canal: o Telegram devolve `file_id` e a URL só
       sai depois de um `getFile`; a Meta devolve `id` e a URL só sai da Graph.
 
-    Um anexo de 200 MB de link externo é barrado DEPOIS do download, em
-    `_resolver_anexos`, e não aqui: descobrir o tamanho antes exigiria um HEAD em
-    toda URL, e servidor que não responde a HEAD não é raro.
+    Um anexo de link externo tem o tamanho conferido durante a leitura
+    (`_baixar_url`, que corta em `LIMITE_POR_ARQUIVO` e não carrega a resposta
+    inteira) e a URL precisa ser pública. `_resolver_anexos` continua
+    conferindo o total, porque o que ele protege é o conjunto de anexos.
     """
     fonte = m.fonte
     if "base64" in fonte:
@@ -55,18 +148,12 @@ async def _baixar_anexo(canal: dict, m: midia.Midia) -> tuple[str, bytes]:
                     raise ValueError("base64 invalido")
                 return m.mime, dados
             raise ValueError("o chat do site so aceita arquivo enviado na propria mensagem")
-        import httpx
-
-        async with httpx.AsyncClient(timeout=TIMEOUT_ANEXO_SEG, follow_redirects=True) as http:
-            resposta = await http.get(str(fonte["url"]))
-        resposta.raise_for_status()
-        dados = resposta.content
         # O content-type do servidor ganha: link de "download" costuma mandar
         # application/octet-stream para o que é um JPEG, e aí o modelo receberia
-        # bytes de imagem declarados como arquivo sem tipo.
-        mime = (str(resposta.headers.get("content-type") or m.mime)
-                .split(";")[0].strip() or m.mime)
-        return mime, dados
+        # bytes de imagem declarados como arquivo sem tipo. `_baixar_url` confere
+        # que a URL é pública (inclusive depois de cada redirect) e corta o
+        # download no limite, sem carregar a resposta inteira na memória.
+        return await _baixar_url(str(fonte["url"]), m.mime)
 
     ref = str(fonte.get("ref") or "")
     tipo_canal = (canal or {}).get("tipo", "")

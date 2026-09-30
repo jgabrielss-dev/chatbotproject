@@ -1198,11 +1198,17 @@ check("a tela avisa o passo do webhook depois de criar o canal",
 check("o telegram tem botao de registrar webhook na lista",
       "data-webhook-tg" in _painel)
 
-# O segredo redigido volta mascarado, entao o formulario de edicao nao pode
-# exigir que o usuario re-digite o token que ele NAO consegue ver.
-check("editar canal explica que o segredo guardado nao volta para o navegador",
-      "não volta para o navegador" in _painel
-      and '=== "********"' in _painel)
+# O segredo redigido volta mascarado. O formulario de edicao nao pode exigir que
+# o usuario re-digite o token que ele NAO consegue ver -- e o servidor
+# (`mesclar_config_sync`) ja preserva o valor quando o campo chega vazio ou
+# mascarado, entao exigir aqui so fazia o botao Salvar nao fazer nada.
+check("editar canal nao exige redigitar o segredo guardado",
+      "não volta para o navegador" not in _painel
+      and "deixe em branco para manter" in _painel
+      and "mesclar_config_sync" in _main_py)
+check("e o servidor e quem preserva o segredo na edicao",
+      "MASCARA" in (ROOT / "app" / "repositories.py").read_text(encoding="utf-8")
+      and "mesclar_config_sync" in _main_py)
 
 # `api()` devolve o JSON cru. Se a rota vier com outra coisa (proxy engasgado
 # devolvendo {}, migracao no meio, rota antiga em cache), usar isso como lista
@@ -1982,9 +1988,22 @@ if tem_testclient:
                 "metodo": "pix", "referencia": "mp-7777", "qr_code": "000201",
                 "expira_em": None} if pagamento_id == 77 else None
 
+    _ja_pagos: set[int] = set()
+
     async def _marcar_fake(pagamento_id, referencia=""):
+        """Contrato de `rc.marcar_pagamento_pago`: (linha, fez_a_transicao).
+
+        Devolver um dicionado aqui (como estava) fazia a rota desempacotar as
+        CHAVES do dict: `transicao` virava a string "status", que é verdadeira,
+        e o teste passava sem exercitar a trava de duplicidade.
+        """
         _marcados.append((pagamento_id, referencia))
-        return {"id": pagamento_id, "status": "pago"}
+        if pagamento_id in _ja_pagos:
+            return ({"id": pagamento_id, "status": "pago",
+                     "aplicado_em": _dt.datetime.now(_dt.timezone.utc).isoformat()},
+                    False)
+        _ja_pagos.add(pagamento_id)
+        return {"id": pagamento_id, "status": "pago"}, True
 
     async def _abrir_fake(usuario_id, _pagamento):
         _abertos.append(usuario_id)
@@ -2019,6 +2038,378 @@ if tem_testclient:
         rotas_mod.rc.obter_pagamento = _obter_orig
         rotas_mod.rc.marcar_pagamento_pago = _marcar_orig
         rotas_mod._abrir_periodo_pago = _abrir_orig
+
+print("\n== correções: canais oficiais (edge function) ==")
+_edge_txt = (ROOT / "supabase" / "functions" / "inbox" / "index.ts").read_text(
+    encoding="utf-8")
+_fonte_assin = _edge_txt[_edge_txt.index("async function conferirAssinatura"):
+                       _edge_txt.index("// Verificação de webhook que o Meta faz")]
+check("a edge function NAO aceita evento sem app_secret (fail-closed)",
+      "return false;" in _fonte_assin
+      and _fonte_assin.index("if (!segredo)") < _fonte_assin.index("importKey")
+      and "return true;" not in _fonte_assin)
+check("a edge function aceita as duas grafias do cabecalho da Meta",
+      "x-hub-signature-256" in _fonte_assin and "x-hub-signature\"" in _fonte_assin)
+check("a conferenca da assinatura e em tempo constante",
+      "dif |= a[i] ^ b[i]" in _fonte_assin)
+check("a edge function le appSecret tambem", "cfg?.appSecret" in _fonte_assin)
+_fonte_meta = _edge_txt[_edge_txt.index("async function handleMetaMensagem"):]
+check("foto sem legenda no canal oficial nao e mais descartada",
+      "extrairMidiaMeta" in _fonte_meta
+      and "(!legenda && !midia)" in _fonte_meta)
+check("a midia da Meta entra em payload_json sob a chave 'anexo'",
+      "anexo: midia.anexo" in _fonte_meta)
+check("a midia da Meta vai como ref (a Graph resolve com o token do canal)",
+      'ref,' in _edge_txt and 'tipoDoMime' in _edge_txt)
+check("o worker ainda e quem procura 'anexo' no payload_json",
+      '"anexo"' in inspect.getsource(main_mod._anexos_do_item))
+
+print("\n== correções: o F5 não apaga mais a conversa ==")
+_chat_js = (ROOT / "chat.js").read_text(encoding="utf-8")
+_fonte_hist = _chat_js[_chat_js.index("function carregarHistorico"):
+                       _chat_js.index("function carregarHistorico") + 700]
+check("o historico do chat interno leva o cabecalho de autenticacao",
+      "Auth.cabecalhoAuth()" in _fonte_hist,
+      "sem isso o suporte do painel recebia 401 e a conversa sumia em silencio")
+_fonte_chat_int = (ROOT / "app" / "chat_interno.py").read_text(encoding="utf-8")
+check("a rota de historico existe e depende da sessao do visitante",
+      "/{chave}/historico" in _fonte_chat_int
+      and "exige_login" in _fonte_chat_int)
+
+# --------------------------------------------------------------------------
+print("\n== correções: nada de plano grátis com um clique ==")
+
+# `POST /api/plano/pagamento/{id}/pagar` sem gateway E sem PAGAMENTO_DEMO
+# explícito precisa recusar: um PAT do Mercado Pago esquecido no deploy
+# transformava a cobrança em botão de presente.
+_check_pagar_orig = rotas_mod.settings.pagamento_demo
+try:
+    _obj(rotas_mod.settings, "pagamento_demo", False)
+    check("pagar sem gateway e sem PAGAMENTO_DEMO e recusado (nao abre plano)",
+          "indispon" in inspect.getsource(rotas_mod.pagar)
+          and "pagamento_demo" in inspect.getsource(rotas_mod.pagar))
+finally:
+    _obj(rotas_mod.settings, "pagamento_demo", _check_pagar_orig)
+
+# O preco do checkout vem do catalogo, nunca da coluna `pagamentos.valor`.
+_fonte_checkout = inspect.getsource(rotas_mod.checkout)
+check("o checkout cobra o preco do catalogo, nao o valor gravado no pedido",
+      "preco_do_ciclo(plano, ciclo)" in _fonte_checkout
+      and 'float(pagamento.get("valor")' not in _fonte_checkout)
+check("o checkout recusa sem BASE_URL (sem ele nao existe webhook)",
+      "base_url" in _fonte_checkout)
+check("o checkout grava o valor enviado no pagamento (conferencia na confirmacao)",
+      "valor=valor" in _fonte_checkout)
+
+# Confirmacao por valor: um PIX de R$ 0,01 apontado para um pagamento nosso
+# nao pode abrir Specialist.
+check("a confirmacao compara o valor recebido com o do pagamento",
+      _valor := rotas_mod._valor_bate(
+          {"status": "approved", "transaction_amount": 0.01},
+          {"id": 1, "valor": 297.0}) is False, str(_valor))
+check("a confirmacao aceita o valor certo (tolerancia de centavo)",
+      rotas_mod._valor_bate({"transaction_amount": 297.0}, {"valor": 297.0}) is True)
+check("a confirmacao aceita o valor com um centavo de diferenca",
+      rotas_mod._valor_bate({"transaction_amount": 80.01}, {"valor": 80.0}) is True)
+check("sem valor no provedor, quem decide e quem chama (elo forte)",
+      rotas_mod._valor_bate({"status": "approved"}, {"valor": 80.0}) is True)
+check("valor ilegivel do provedor e rejeitado",
+      rotas_mod._valor_bate({"transaction_amount": "muito"}, {"valor": 80.0}) is False)
+
+# Idempotencia do pagamento: uma so transicao abre periodo.
+import app.repos_cobranca as rc_cobranca_mod  # noqa: E402
+
+_fonte_marcar = inspect.getsource(rc_cobranca_mod.marcar_pagamento_pago)
+check("a leitura do pagamento caiu DENTRO do bloco da conexao",
+      _fonte_marcar.index("async with pool.acquire()")
+      < _fonte_marcar.rindex("con.fetchrow"),
+      "usar con depois do async with levanta InterfaceError do asyncpg")
+_fonte_aplicar = inspect.getsource(rc_cobranca_mod.aplicar_plano_pago)
+check("a aplicacao so acontece uma vez (aplicado_em IS NULL no banco)",
+      "AND aplicado_em IS NULL" in _fonte_aplicar)
+check("a trava vem antes de mexer na assinatura",
+      _fonte_aplicar.index("aplicado_em IS NULL")
+      < _fonte_aplicar.index("UPDATE assinaturas"))
+_fonte_abrir = inspect.getsource(rotas_mod._abrir_periodo_pago)
+check("so quem teve a transicao abre o periodo",
+      "if transicao:" in inspect.getsource(rotas_mod.pagar)
+      and 'if pagamento.get("aplicado_em")' in _fonte_abrir)
+check("o ciclo gravado e normalizado antes de virar preco e periodo",
+      "normalizar_ciclo" in _fonte_abrir)
+
+# Webhook: 503 quando a consulta reversa falha (o MP precisa repetir), 200
+# quando o corpo e lixo (nao ha nada para repetir).
+if tem_testclient:
+    _consultar_orig2 = mpm.consultar_pagamento
+    _por_ref_orig2 = rotas_mod.rc.obter_pagamento_por_referencia
+    _marcar_orig2 = rotas_mod.rc.marcar_pagamento_pago
+    _abrir_orig2 = rotas_mod._abrir_periodo_pago
+    _marcados2: list[tuple[int, str]] = []
+    _abertos2: list[str] = []
+
+    async def _consultar_fora(mp_id):
+        raise mpm.MercadoPagoError("provedor de pagamento inacessível no momento")
+
+    async def _consultar_cheap(mp_id):
+        return {"id": mp_id, "status": "approved", "transaction_amount": 0.01,
+                "external_reference": str(mp_id)}
+
+    async def _por_ref_fake2(referencia):
+        if referencia != "mp-8888":
+            return None
+        return {"id": 88, "usuario_id": "u-88", "plano_id": "especialista",
+                "ciclo": "mensal", "valor": 297.0, "status": "pendente",
+                "referencia": "mp-8888"}
+
+    async def _marcar_fake2(pagamento_id, referencia=""):
+        _marcados2.append((pagamento_id, referencia))
+        return {"id": pagamento_id, "status": "pago"}, True
+
+    async def _abrir_fake2(usuario_id, _pagamento):
+        _abertos2.append(usuario_id)
+
+    try:
+        mpm.consultar_pagamento = _consultar_fora
+        rotas_mod.rc.obter_pagamento_por_referencia = _por_ref_fake2
+        rotas_mod.rc.marcar_pagamento_pago = _marcar_fake2
+        rotas_mod._abrir_periodo_pago = _abrir_fake2
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/webhooks/mercadopago",
+                       json={"type": "payment", "action": "payment.updated",
+                             "data": {"id": 8888}})
+            check("consulta reversa fora do ar responde 5xx (o MP precisa repetir)",
+                  r.status_code >= 500, f"HTTP {r.status_code}")
+            check("e nada foi marcado pago com a consulta falhando",
+                  _marcados2 == [] and _abertos2 == [], repr(_marcados2))
+
+            mpm.consultar_pagamento = _consultar_cheap
+            r = c.post("/api/webhooks/mercadopago",
+                       json={"type": "payment", "action": "payment.updated",
+                             "data": {"id": 8888}})
+            check("PIX com valor de outro pagamento nao abre o plano",
+                  r.status_code == 200 and not r.json().get("pago")
+                  and _marcados2 == [], f"HTTP {r.status_code} {r.text[:80]}")
+
+            r = c.post("/api/webhooks/mercadopago",
+                       json={"type": "payment", "action": "payment.updated",
+                             "data": {"id": "abc"}})
+            check("data.id nao numerico e ignorado com 200 (nao 500)",
+                  r.status_code == 200 and r.json().get("ignorado") == "id invalido",
+                  f"HTTP {r.status_code} {r.text[:80]}")
+    finally:
+        mpm.consultar_pagamento = _consultar_orig2
+        rotas_mod.rc.obter_pagamento_por_referencia = _por_ref_orig2
+        rotas_mod.rc.marcar_pagamento_pago = _marcar_orig2
+        rotas_mod._abrir_periodo_pago = _abrir_orig2
+
+check("o webhook tem teto de corpo",
+      "LIMITE_CORPO_WEBHOOK_MP" in inspect.getsource(rotas_mod.webhook_mercadopago))
+
+print("\n== correções: idempotência da troca de plano ==")
+check("troca reaproveita o pagamento pendente equivalente",
+      "pagamento_pendente_equivalente" in inspect.getsource(rotas_mod.trocar))
+check("troca recusa repetir a troca ja agendada",
+      "plano_proximo" in inspect.getsource(rotas_mod.trocar)
+      and "já está agendada" in cob.pode_trocar_de_plano("inicio", "pro", "pro")[1])
+check("troca ainda recusa o plano atual e o teste",
+      not cob.pode_trocar_de_plano("inicio", "inicio")[0]
+      and not cob.pode_trocar_de_plano("inicio", cob.PLANO_TESTE)[0])
+check("a troca continua aceitando plano novo mesmo com outro agendado",
+      cob.pode_trocar_de_plano("inicio", "pro", "negocio")[0])
+check("a troca continua aceitando downgrade",
+      cob.pode_trocar_de_plano("pro", "inicio")[0])
+
+print("\n== correções: ciclo nunca vira 12 meses pagos como 1 ==")
+_pl = cob.plano(cob.PLANO_PRO)
+for _ciclo in ("mensal", "anual", "Anual", " anual ", "MENSAL", "", None):
+    _n = cob.normalizar_ciclo(_ciclo)
+    check(f"ciclo {str(_ciclo)!r} normaliza para um valor do catálogo",
+          _n in ("mensal", "anual"), _n)
+check("'Anual' cobra preco anual e entrega 12 meses (nada de 11 de graca)",
+      cob.preco_do_ciclo(_pl, "Anual") == _pl.preco_anual
+      and cob.fim_do_periodo(_dt.datetime(2026, 1, 10), "Anual").year == 2027)
+check("ciclo desconhecido nunca multiplica o periodo",
+      cob.fim_do_periodo(_dt.datetime(2026, 1, 10), "seman").month == 2)
+
+print("\n== correções: cota e isenção ==")
+# O admin era barrado no gerador de prompt (item 12) por `contexto` nao dizer
+# `sem_cota`; confirmado em producao com 403.
+_fonte_contexto = inspect.getsource(lim.contexto)
+check("contexto marca sem_cota no ramo do admin (item 12 aberto para o dono)",
+      _fonte_contexto.count('resumo["sem_cota"] = True') == 2,
+      str(_fonte_contexto.count('resumo["sem_cota"] = True')))
+check("o isento tambem ganha sem_cota explicito (nao por acaso do plano alto)",
+      '"sem_cota": True' in inspect.getsource(lim) and "isento" in _fonte_contexto)
+
+# Cota de criacao: periodo vencido barra pelo motivo certo, admin/isento nao.
+async def _exige(status, *, isento=False, admin=False, usados=0):
+    async def _assinatura(usuario_id):
+        return {"status": status}
+
+    async def _plano(usuario_id, eh_admin=False):
+        return cob.plano(cob.PLANO_INICIO)
+
+    async def _isento_por_id(usuario_id):
+        return isento
+
+    async def _contar(usuario_id):
+        return usados
+
+    a, p, i, c = (lim.assinatura_atual, lim.plano_atual,
+                  lim.eh_isento_por_id, lim.contar_agentes)
+    lim.assinatura_atual, lim.plano_atual = _assinatura, _plano
+    lim.eh_isento_por_id, lim.contar_agentes = _isento_por_id, _contar
+    try:
+        return await lim.exigir_cota_agentes("u-1", admin)
+    finally:
+        lim.assinatura_atual, lim.plano_atual = a, p
+        lim.eh_isento_por_id, lim.contar_agentes = i, c
+
+
+for _status in ("cancelado", "expirado"):
+    try:
+        asyncio.run(_exige(_status))
+        check(f"criar agente com periodo {_status} e barrado", False, "aceitou")
+    except _HTTPException as e:
+        check(f"criar agente com periodo {_status} e barrado (402)",
+              e.status_code == 402 and "acabou" in str(e.detail), f"{e.status_code}")
+asyncio.run(_exige("ativo"))
+check("criar agente dentro do plano passa", True)
+asyncio.run(_exige("expirado", admin=True))
+check("criar agente como admin passa (admin nao tem cota)", True)
+asyncio.run(_exige("expirado", isento=True))
+check("criar agente como isento passa (isento nunca paga, nunca e barrado)", True)
+try:
+    asyncio.run(_exige("expirado", usados=99))
+    check("criar agente com o teto do plano estourado e barrado", False, "aceitou")
+except _HTTPException as e:
+    check("criar agente com o teto do plano estourado e barrado (402)",
+          e.status_code == 402, f"{e.status_code}")
+check("exigir_cota_agentes recebe o papel do admin",
+      "eh_admin" in inspect.signature(lim.exigir_cota_agentes).parameters)
+check("exigir_cota_canais recebe o papel do admin",
+      "eh_admin" in inspect.signature(lim.exigir_cota_canais).parameters)
+check("a rota de agente repassa o papel para a cota",
+      "exigir_cota_agentes(usuario.id, usuario.eh_admin)"
+      in inspect.getsource(main_mod.post_agente))
+
+# O dono do agente e coluna de `agentes`, nao de `canais`: ler do canal
+# devolvia sempre vazio e nenhuma mensagem de canal conferia cota.
+_fonte_cota = inspect.getsource(main_mod._cota_do_dono)
+_cota_codigo = _fonte_cota.split('"""', 2)[-1]  # sem a docstring, que cita o bug
+check("a cota do worker le o dono no AGENTE (canais nao tem coluna dono_id)",
+      'canal.get("dono_id")' not in _cota_codigo
+      and 'dono = agente.get("dono_id")' in _cota_codigo)
+check("a cota do worker repassa o papel do dono (admin nao e barrado)",
+      "eh_admin_por_id" in _fonte_cota)
+check("a cota e conferida antes de chamar a IA",
+      _fonte_cota in inspect.getsource(main_mod._processar_caixa)
+      or "_cota_do_dono" in inspect.getsource(main_mod._processar_caixa))
+check("a reserva da fila e condicional (dois workers nao respondem em duplicidade)",
+      "AND status IN ('pendente', 'erro') RETURNING id"
+      in inspect.getsource(repo.marcar_caixa_processando))
+check("o worker pula o item que outro worker pegou",
+      "if not await repo.marcar_caixa_processando" in inspect.getsource(main_mod._processar_caixa))
+check("a fila nao repete IA a cada 5 minutos para sempre",
+      "TENTATIVAS_IA_MAX" in inspect.getsource(main_mod._proxima_tentativa))
+
+print("\n== correções: isolamento entre contas ==")
+# O join da fila casava canais.id com agentes.id: a fila de um cliente aparecia
+# para o dono do agente de MESMO numero, com texto e remetente da conversa.
+_fonte_resumo = inspect.getsource(repo.resumo_caixa)
+check("a fila entra pelo caminho canal -> agente (nao por id igual)",
+      "JOIN canais k ON k.id = c.canal_id JOIN agentes a ON a.id = k.agente_id"
+      in _fonte_resumo and "ON a.id = c.canal_id" not in _fonte_resumo)
+check("as estatisticas da home usam o mesmo caminho",
+      "JOIN canais k ON k.id = c.canal_id" in inspect.getsource(repo.estatisticas_do_dono))
+check("a RLS da fila usa o caminho certo tambem",
+      "c.id = caixa_entrada.canal_id"
+      in (ROOT / "sql" / "schema.sql").read_text(encoding="utf-8"))
+
+print("\n== correções: cache de sessão e papel ==")
+# O cache e por token e `limpar_cache(usuario_id)` removia por id: nunca
+# acertava, entao bloqueio/promocao valiam so depois de 60 s.
+_ut = auth_mod.Usuario(id="u-cache", email="a@b.c", role=auth_mod.ROLE_USUARIO)
+auth_mod._cache.clear()
+auth_mod._cache["tok-1"] = (_time.time() + 999, _ut)
+auth_mod._cache["tok-2"] = (_time.time() + 999, auth_mod.Usuario(
+    id="u-outro", email="c@d.e", role=auth_mod.ROLE_USUARIO))
+auth_mod.limpar_cache("u-cache")
+check("limpar_cache por usuario apaga o token daquela conta",
+      "tok-1" not in auth_mod._cache)
+check("limpar_cache por usuario nao apaga a conta de outro",
+      "tok-2" in auth_mod._cache)
+auth_mod.limpar_cache()
+check("limpar_cache() apaga tudo", auth_mod._cache == {})
+check("o token de emergencia e comparado em tempo constante",
+      "compare_digest" in inspect.getsource(auth_mod._token_de_emergencia))
+check("a mudanca de e-mail invalida a cache de isencao",
+      "limpar_cache" in inspect.getsource(auth_mod.usuario_do_token)
+      or "atualizar_email_perfil" in inspect.getsource(auth_mod.usuario_do_token))
+
+print("\n== correções: webhooks e SSRF ==")
+import app.pipeline as _pl_mod  # noqa: E402
+
+
+async def _url(alvo):
+    return await _pl_mod._url_publica(alvo)
+
+
+for _ruim in ("http://127.0.0.1/x", "http://169.254.169.254/latest/meta-data/",
+              "http://localhost:5432", "http://10.0.0.5/",
+              "http://[::1]/", "file:///etc/passwd", "ftp://x/y"):
+    try:
+        asyncio.run(_url(_ruim))
+        check(f"anexo por url recusa {_ruim}", False, "aceitou")
+    except ValueError as e:
+        check(f"anexo por url recusa {_ruim}", True, str(e)[:40])
+try:
+    asyncio.run(_url("http://nenhum-dominio-inexistente-abc123.invalid/x"))
+    check("host que nao resolve e recusado", False, "aceitou")
+except ValueError as e:
+    check("host que nao resolve e recusado", True, str(e)[:40])
+check("o download de anexo e cortado no limite durante a leitura",
+      "aiter_bytes" in inspect.getsource(_pl_mod._baixar_url)
+      and "LIMITE_POR_ARQUIVO" in inspect.getsource(_pl_mod._baixar_url))
+check("cada redirect e conferido de novo",
+      inspect.getsource(_pl_mod._baixar_url).count("_url_publica(") >= 2)
+_fonte_wb_tg = inspect.getsource(main_mod.webhook_telegram)
+check("o webhook do telegram confere o segredo antes de ler o corpo",
+      _fonte_wb_tg.index("_secret_igual") < _fonte_wb_tg.index("_json_do_webhook"))
+_fonte_wb_ev = inspect.getsource(main_mod.webhook_evolution)
+check("o webhook da evolution tambem",
+      _fonte_wb_ev.index("_secret_igual") < _fonte_wb_ev.index("_json_do_webhook"))
+check("origem degenerada nao vira 'tg:None' (que perderia toda a fila do canal)",
+      "update_id is not None" in _fonte_wb_tg and "and key_id:" in _fonte_wb_ev)
+check("o webhook generico nao devolve o erro interno ao integrador",
+      '"erro": item["ultimo_erro"]' not in inspect.getsource(main_mod.webhook_generico))
+check("o webhook generico deduplica por id de evento do integrador",
+      "event_id" in inspect.getsource(main_mod.webhook_generico))
+check("corpo grande ou json invalido de webhook vira 4xx, nao 500",
+      "LIMITE_CORPO_WEBHOOK" in inspect.getsource(main_mod._json_do_webhook))
+
+print("\n== correções: isncao e ambiente ==")
+import app.config as _cfg_mod  # noqa: E402
+
+for _valor, _esperado in (
+    ("a@x.com,b@y.com", {"a@x.com", "b@y.com"}),
+    ("a@x.com b@y.com", {"a@x.com", "b@y.com"}),
+    ("a@x.com; b@y.com\nc@z.com", {"a@x.com", "b@y.com", "c@z.com"}),
+    ("  A@X.com  ", {"a@x.com"}),
+    ("", set()),
+    (None, set()),
+):
+    check(f"CONTAS_ISENTAS {_valor!r} vira lista de e-mails",
+          _cfg_mod._ler_isentas(_valor) == _esperado, str(_cfg_mod._ler_isentas(_valor)))
+check("o padrao de CONTAS_ISENTAS tem o dono e a conta de teste",
+      {"joaogabrielss.2007@gmail.com", "jgkwy07@gmail.com"}
+      <= _cfg_mod.settings.contas_isentas, str(sorted(_cfg_mod.settings.contas_isentas)))
+check("PAGAMENTO_DEMO e desligado por padrao (nada de plano de graca)",
+      _cfg_mod.settings.pagamento_demo is False)
+for _v in ("1", "true", "SIM", "yes"):
+    check(f"PAGAMENTO_DEMO={_v!r} liga o atalho de teste", _cfg_mod._verdadeiro(_v) is True)
+for _v in ("", "0", "false", "nao", None, "2"):
+    check(f"PAGAMENTO_DEMO={_v!r} NAO liga o atalho de teste", _cfg_mod._verdadeiro(_v) is False)
 
 # --------------------------------------------------------------------------
 print("\n== resumo ==")

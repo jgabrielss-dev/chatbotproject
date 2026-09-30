@@ -35,6 +35,11 @@ log = logging.getLogger("rotas_cobranca")
 
 router = APIRouter(tags=["cobranca"])
 
+#: Teto do corpo do webhook do MP. A notificação real tem quelques centenas de
+#: bytes; sem limite, um POST público de gigabytes é trabalho de graça para o
+#: processo (e um 413 é resposta mais honesta que um 500).
+LIMITE_CORPO_WEBHOOK_MP = 64 * 1024
+
 
 def _isento(usuario) -> bool:
     """O dono/operador (e as contas de teste) não passam pelo checkout."""
@@ -90,13 +95,15 @@ async def trocar(request: Request):
 
     body = await request.json()
     alvo = str(body.get("plano") or "").strip()
-    ciclo = str(body.get("ciclo") or "mensal").strip()
+    ciclo = str(body.get("ciclo") or "mensal").strip().lower()
     if ciclo not in ("mensal", "anual"):
         raise HTTPException(400, "Ciclo inválido: use 'mensal' ou 'anual'.")
 
     assinatura = await rc.garantir_assinatura(usuario.id)
     atual = assinatura.get("plano_id")
-    pode, motivo = cobranca.pode_trocar_de_plano(atual, alvo)
+    pode, motivo = cobranca.pode_trocar_de_plano(
+        atual, alvo, assinatura.get("plano_proximo"),
+    )
     if not pode:
         raise HTTPException(400, motivo)
 
@@ -108,9 +115,16 @@ async def trocar(request: Request):
     # pedido. O gateway, quando existir, marca este pagamento como pago; até
     # lá ele fica 'pendente' e nada muda (que é o comportamento correto: um
     # plano pago nunca entra sem pagamento).
-    await rc.criar_pagamento(
-        usuario.id, novo.id, ciclo, cobranca.preco_do_ciclo(novo, ciclo), metodo="",
-    )
+    #
+    # Idempotente: se já existe pagamento pendente deste usuário para o mesmo
+    # plano e ciclo, ele é reaproveitado. Sem isso, cada clique criava uma linha
+    # nova — e o cliente via cinco cobranças iguais no livro de pagamentos só
+    # por clicar duas vezes com a página lenta.
+    pendente = await rc.pagamento_pendente_equivalente(usuario.id, novo.id, ciclo)
+    if not pendente:
+        await rc.criar_pagamento(
+            usuario.id, novo.id, ciclo, cobranca.preco_do_ciclo(novo, ciclo), metodo="",
+        )
     return await limites.contexto(usuario.id)
 
 
@@ -190,9 +204,10 @@ async def pagar(pagamento_id: int, request: Request):
         return await limites.contexto(usuario.id)
 
     if _isento(usuario):
-        await rc.marcar_pagamento_pago(pagamento_id, referencia="isento")
+        _, transicao = await rc.marcar_pagamento_pago(pagamento_id, referencia="isento")
         await rc.definir_metodo(pagamento_id, "isento")
-        await _abrir_periodo_pago(usuario.id, pagamento)
+        if transicao:
+            await _abrir_periodo_pago(usuario.id, pagamento)
         limites.limpar_cache(usuario.id)
         return await limites.contexto(usuario.id)
 
@@ -203,8 +218,22 @@ async def pagar(pagamento_id: int, request: Request):
             "pagamentos para ver o QR code.",
         )
 
-    await rc.marcar_pagamento_pago(pagamento_id, referencia=f"demo-{pagamento_id}")
-    await _abrir_periodo_pago(usuario.id, pagamento)
+    if not settings.pagamento_demo:
+        # Sem gateway e sem `PAGAMENTO_DEMO=1` escrito de propósito, esta rota
+        # não confirma nada. A diferença é entre "plano pago" e "plano grátis
+        # com um clique": um PAT do Mercado Pago esquecido no deploy não pode
+        # virar botão de presente para qualquer conta logada.
+        raise HTTPException(
+            503,
+            "O pagamento online está indisponível no momento. Tente novamente "
+            "em instantes (ou fale com o atendimento).",
+        )
+
+    _, transicao = await rc.marcar_pagamento_pago(
+        pagamento_id, referencia=f"demo-{pagamento_id}",
+    )
+    if transicao:
+        await _abrir_periodo_pago(usuario.id, pagamento)
     limites.limpar_cache(usuario.id)
     return await limites.contexto(usuario.id)
 
@@ -216,8 +245,16 @@ async def _abrir_periodo_pago(usuario_id: str, pagamento: dict) -> None:
     agora), o novo período começa no `fim_periodo` antigo — a regra do item 9,
     "preço e regras mudam só no fim do que já foi pago", vale inclusive quando
     o pagamento chega antes. Se o período já venceu, começa agora.
+
+    Quem decide se isto roda é o chamador: só quem recebeu `transicao=True` de
+    `marcar_pagamento_pago`. Um pagamento já aplicado sai cedo, e
+    `aplicar_plano_pago` tem a mesma trava no banco (`aplicado_em IS NULL`),
+    então webhook + polling no mesmo instante estendem o período uma vez só.
     """
-    assinatura = await rc.atualizar_periodo(usuario_id) or {}
+    if pagamento.get("aplicado_em"):
+        return
+    assinatura = await rc.garantir_assinatura(usuario_id) or {}
+    assinatura = await rc.atualizar_periodo(usuario_id) or assinatura
     agora = dt.datetime.now(dt.timezone.utc)
     fim = assinatura.get("fim_periodo")
     if isinstance(fim, str):
@@ -227,7 +264,7 @@ async def _abrir_periodo_pago(usuario_id: str, pagamento: dict) -> None:
     expirada = assinatura.get("status") in ("cancelado", "expirado")
     inicio = agora if (fim is None or expirada or fim <= agora) else fim
     p = cobranca.plano(pagamento.get("plano_id"))
-    ciclo = pagamento.get("ciclo") or "mensal"
+    ciclo = cobranca.normalizar_ciclo(pagamento.get("ciclo"))
     novo_fim = cobranca.fim_do_periodo(inicio, ciclo)
 
     await rc.aplicar_plano_pago(usuario_id, p.id, ciclo, inicio, novo_fim, pagamento["id"])
@@ -262,14 +299,24 @@ async def checkout(pagamento_id: int, request: Request):
         return await limites.contexto(usuario.id)
 
     if _isento(usuario):
-        await rc.marcar_pagamento_pago(pagamento_id, referencia="isento")
+        _, transicao = await rc.marcar_pagamento_pago(pagamento_id, referencia="isento")
         await rc.definir_metodo(pagamento_id, "isento")
-        await _abrir_periodo_pago(usuario.id, pagamento)
+        if transicao:
+            await _abrir_periodo_pago(usuario.id, pagamento)
         limites.limpar_cache(usuario.id)
         return {"status": "pago", "isento": True,
                 "pagamento_id": pagamento_id}
 
     if not settings.has_mercadopago:
+        raise HTTPException(
+            503,
+            "O pagamento online está indisponível no momento. Tente novamente "
+            "em instantes (ou fale com o atendimento).",
+        )
+    if not settings.base_url:
+        # Sem `BASE_URL` o PIX é criado sem `notification_url`: o cliente paga e
+        # só o polling do navegador confirmaria, o que se perde no primeiro
+        # fechar da aba. Melhor recusar agora, com a integration viva.
         raise HTTPException(
             503,
             "O pagamento online está indisponível no momento. Tente novamente "
@@ -289,8 +336,19 @@ async def checkout(pagamento_id: int, request: Request):
         }
 
     plano = cobranca.plano(pagamento.get("plano_id"))
-    ciclo = pagamento.get("ciclo") or "mensal"
-    valor = float(pagamento.get("valor") or cobranca.preco_do_ciclo(plano, ciclo))
+    ciclo = cobranca.normalizar_ciclo(pagamento.get("ciclo"))
+    # O valor vem do CATÁLOGO, nunca de `pagamentos.valor`: o catálogo é a
+    # única fonte de preço (sincronizado com o `planos` no boot) e a coluna foi
+    # gravada no momento do pedido — com o preço antigo, ou editada por quem
+    # achasse a tabela. Divergência de centavos aqui é o cliente pagando menos
+    # do que o plano vale.
+    valor = round(cobranca.preco_do_ciclo(plano, ciclo), 2)
+    if valor <= 0:
+        raise HTTPException(
+            503,
+            "O pagamento online está indisponível no momento. Tente novamente "
+            "em instantes (ou fale com o atendimento).",
+        )
     try:
         pix = await mp.criar_pagamento_pix(
             valor,
@@ -304,6 +362,7 @@ async def checkout(pagamento_id: int, request: Request):
     await rc.guardar_checkout_pix(
         pagamento_id, f"mp-{pix.get('id')}", pix.get("qr_code") or "",
         pix.get("expira_em"),
+        valor=valor,
     )
     return {
         "status": pix.get("status", "pendente"),
@@ -333,17 +392,47 @@ async def situacao_pagamento(pagamento_id: int, request: Request):
     )
     if pagamento.get("status") == "pendente" and settings.has_mercadopago:
         referencia = str(pagamento.get("referencia") or "")
-        if referencia.startswith("mp-"):
+        if referencia.startswith("mp-") and referencia[3:].isdigit():
             try:
                 estado = await mp.consultar_pagamento(int(referencia[3:]))
             except mp.MercadoPagoError:
                 estado = {}
-            if estado.get("status") == "approved":
-                await rc.marcar_pagamento_pago(pagamento_id, referencia=referencia)
-                await _abrir_periodo_pago(usuario.id, pagamento)
+            if estado.get("status") == "approved" and _valor_bate(estado, pagamento):
+                _, transicao = await rc.marcar_pagamento_pago(
+                    pagamento_id, referencia=referencia,
+                )
+                if transicao:
+                    await _abrir_periodo_pago(usuario.id, pagamento)
                 limites.limpar_cache(usuario.id)
                 pagamento = await rc.obter_pagamento(pagamento_id) or pagamento
     return pagamento
+
+
+def _valor_bate(estado: dict, pagamento: dict) -> bool:
+    """O valor que o MP diz ter recebido é o que este pagamento vale?
+
+    A consulta reversa prova que o pagamento existe e foi aprovado, mas o id do
+    MP chega no corpo do webhook, que é público. Um PIX de R$ 0,01 criado no
+    painel do Mercado Pago passaria por ela e abriria um Specialist. Conferir o
+    `transaction_amount` contra o que este registro vale fecha o circuito.
+
+    Se o provedor não devolveu o campo, a decisão é de quem chama: no polling o
+    pagamento JÁ tem a referencia `mp-{id}` que gravamos no checkout, então o
+    elo é forte; no fallback do webhook não é, e lá o valor é obrigatório.
+    """
+    recebido = estado.get("transaction_amount")
+    if recebido is None:
+        return True
+    try:
+        pago = float(recebido)
+    except (TypeError, ValueError):
+        return False
+    esperado = float(pagamento.get("valor") or 0.0)
+    # Compara em centavos inteiros: `abs(80.01 - 80.0)` vale
+    # 0.010000000000001563 em ponto flutuante, que reprovaria a diferença de um
+    # centavo que o PIX manda (arredondamento do provedor) — e reprovar o
+    # pagamento real é pior que aceitar o centavo.
+    return abs(round(pago * 100) - round(esperado * 100)) <= 1
 
 
 @router.post("/api/webhooks/mercadopago")
@@ -352,34 +441,49 @@ async def webhook_mercadopago(request: Request):
 
     Nunca confia no corpo sozinho: o segredo (quando configurado) corta
     assinatura inválida, e a consulta reversa na API do MP é quem decide — um
-    `approved` de verdade é que abre o período. Tudo aqui responde 200 mesmo
-    quando ignora, para o MP não repetir a notificação à toa.
+    `approved` de verdade é que abre o período.
+
+    O status da resposta é o que faz o MP repetir a notificação, então ele é
+    deliberado: 200 para "não é nosso", "não está aprovado" ou "já foi tratado",
+    e 5xx SÓ quando a consulta reversa falhou por algo passageiro (a API do MP
+    fora do ar). Responder 200 numa falha de rede é dinheiro recebido que nunca
+    abre o período: o MP dá a notificação como entregue e não volta.
     """
     corpo = await request.body()
+    if len(corpo) > LIMITE_CORPO_WEBHOOK_MP:
+        raise HTTPException(413, "Corpo grande demais para um webhook.")
     if not mp.conferir_assinatura_webhook(dict(request.headers), corpo):
         raise HTTPException(401, "Assinatura de webhook inválida.")
     try:
         dados = json.loads(corpo or b"{}")
     except ValueError:
-        dados = {}
+        return {"recebido": True, "ignorado": "json invalido"}
+    if not isinstance(dados, dict):
+        return {"recebido": True, "ignorado": "json invalido"}
     acao = dados.get("action") or ""
     if acao not in ("payment.created", "payment.updated", "payment") and dados.get("type") not in (
         "payment", "payment_intent",
     ):
         return {"recebido": True, "ignorado": True}
-    mp_id = (dados.get("data") or {}).get("id")
-    if not mp_id:
-        return {"recebido": True, "ignorado": "sem id"}
+    mp_id = str((dados.get("data") or {}).get("id") or "")
+    if not mp_id.isdigit():
+        # `data.id` vem do corpo, que é público: "abc" (ou "²", que passa em
+        # isdigit() e quebra o int()) não é pagamento nenhum. Um 500 aqui faria
+        # o MP reenviar a mesma notificação ruim para sempre.
+        return {"recebido": True, "ignorado": "id invalido"}
     try:
         estado = await mp.consultar_pagamento(int(mp_id))
     except mp.MercadoPagoError as e:
         log.warning("Webhook MP: falha ao consultar %s: %s", mp_id, e)
-        return {"recebido": True, "ignorado": "consulta falhou"}
+        # 503 = "tenta de novo": o MP repete por horas. Fail-closed é o certo
+        # aqui; o que não pode é 200, que é "entregue, não insisto".
+        raise HTTPException(503, "Consulta ao Mercado Pago indisponível.") from e
     if estado.get("status") != "approved":
         return {"recebido": True, "status": estado.get("status")}
 
     referencia = f"mp-{mp_id}"
     pagamento = await rc.obter_pagamento_por_referencia(referencia)
+    elo_forte = pagamento is not None
     if not pagamento:
         # Fallback pelo elo que mandamos na criação (nosso id de pagamentos).
         externa = str(estado.get("external_reference") or "")
@@ -388,12 +492,21 @@ async def webhook_mercadopago(request: Request):
     if not pagamento:
         # Pagamento de outra base/gateway de teste: não é nosso, sem erro.
         return {"recebido": True, "ignorado": "desconhecido"}
+    if not _valor_bate(estado, pagamento) and not (elo_forte and estado.get("transaction_amount") is None):
+        log.warning(
+            "Webhook MP %s: valor divergente (recebido %s, esperado %s) — não aplicado",
+            mp_id, estado.get("transaction_amount"), pagamento.get("valor"),
+        )
+        return {"recebido": True, "ignorado": "valor divergente"}
     if pagamento.get("status") != "pendente":
         return {"recebido": True, "status": pagamento.get("status")}
 
-    await rc.marcar_pagamento_pago(pagamento["id"], referencia=referencia)
-    await _abrir_periodo_pago(str(pagamento["usuario_id"]), pagamento)
-    limites.limpar_cache(str(pagamento["usuario_id"]))
+    _, transicao = await rc.marcar_pagamento_pago(
+        pagamento["id"], referencia=referencia,
+    )
+    if transicao:
+        await _abrir_periodo_pago(str(pagamento["usuario_id"]), pagamento)
+        limites.limpar_cache(str(pagamento["usuario_id"]))
     return {"recebido": True, "pago": True}
 
 

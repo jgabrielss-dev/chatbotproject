@@ -280,15 +280,32 @@ def _add_meses(quando: dt.datetime, meses: int) -> dt.datetime:
     return quando.replace(year=ano, month=mes, day=dia)
 
 
+def normalizar_ciclo(ciclo: str | None) -> str:
+    """'mensal' ou 'anual', canônico, nunca outra coisa.
+
+    O ciclo decide duas coisas ao mesmo tempo — o preço (`preco_do_ciclo`) e
+    quantos meses o cliente recebe (`fim_do_periodo`). Se as duas lessem o
+    valor cru, um `Anual` com espaço no banco seria cobrado como mensal e
+    entregaria 12 meses: 11 de graça. Por isso as duas normalizam, e o
+    desconhecido cai em 'mensal' (a opção que não multiplica período).
+    """
+    c = str(ciclo or "").strip().lower()
+    return c if c in ("mensal", "anual") else "mensal"
+
+
 def fim_do_periodo(inicio: dt.datetime, ciclo: str) -> dt.datetime:
     """Fim do período pago, a partir do início e do ciclo."""
-    if ciclo == "anual":
+    if normalizar_ciclo(ciclo) == "anual":
         return _add_meses(inicio, 12)
     return _add_meses(inicio, 1)
 
 
 def preco_do_ciclo(plano_atual: Plano, ciclo: str) -> float:
-    return plano_atual.preco_anual if ciclo == "anual" else plano_atual.preco_mensal
+    return (
+        plano_atual.preco_anual
+        if normalizar_ciclo(ciclo) == "anual"
+        else plano_atual.preco_mensal
+    )
 
 
 def desconto_anual(plano_atual: Plano) -> float:
@@ -303,17 +320,25 @@ def desconto_anual(plano_atual: Plano) -> float:
 # --------------------------------------------------------------------------
 
 
-def pode_trocar_de_plano(atual_id: str, novo_id: str) -> tuple[bool, str]:
+def pode_trocar_de_plano(
+    atual_id: str, novo_id: str, proximo_id: str | None = None
+) -> tuple[bool, str]:
     """Troca de plano é sempre permitida, mas o efeito é sempre adiado.
 
     A segunda volta do reason: o cliente pode pedir downgrade a qualquer hora
     (mudar de ideia é um direito dele) e upgrade a qualquer hora (não segurar
     alguém no plano errado), e os dois só entram no fim do período pago.
+
+    `proximo_id` é a troca já agendada. Sem esta conferência, clicar duas vezes
+    no mesmo plano criava dois pagamentos pendentes para o mesmo destino — e,
+    com o gateway ligado, duas cobranças.
     """
     if novo_id not in POR_ID:
         return False, f"Plano \"{novo_id}\" não existe."
     if novo_id == atual_id:
         return False, "Você já está neste plano."
+    if proximo_id and novo_id == proximo_id:
+        return False, "Esta troca já está agendada e entra no fim do período atual."
     if novo_id == PLANO_TESTE:
         return False, "O teste de 7 dias não pode ser contratado; ele é gratuito e automático."
     return True, ""

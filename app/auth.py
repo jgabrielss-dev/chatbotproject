@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hmac
 import json
 import logging
 import time
@@ -87,11 +88,20 @@ ADMIN_EMERGENCIA = Usuario(id="admin-token", email="admin@local", role=ROLE_ADMI
 
 
 def limpar_cache(usuario_id: str | None = None) -> None:
-    """Usado pelos testes e depois de mudar o papel de alguém."""
+    """Usado pelos testes e depois de mudar o papel/bloqueio de alguém.
+
+    O cache é indexado pelo TOKEN (é o que a requisição traz), então apagar
+    "por usuário" precisa varrer as entradas e casar o `Usuario.id` — apagar
+    direto por `usuario_id` removia uma chave que nunca existia e a invalidação
+    não fazia nada: quem acabava de ser bloqueado ou rebaixado continuava
+    entrando pelos próximos 60 s, em toda requisição, com o papel antigo.
+    """
     if usuario_id is None:
         _cache.clear()
-    else:
-        _cache.pop(usuario_id, None)
+        return
+    alvo = str(usuario_id)
+    for token in [t for t, (_, u) in _cache.items() if u.id == alvo]:
+        _cache.pop(token, None)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +220,11 @@ def _token_de_emergencia(request: Request) -> bool:
     if not settings.admin_token:
         return False
     informado = request.headers.get("x-admin-token", "")
-    return bool(informado) and informado == settings.admin_token
+    # `compare_digest` e não `==`: comparar segredo com igualdade comum deixa
+    # o tempo de resposta vazar o quanto do prefixo acertou.
+    return bool(informado) and hmac.compare_digest(
+        informado.encode(), settings.admin_token.encode(),
+    )
 
 
 def usuario_atual(request: Request) -> Usuario:

@@ -52,9 +52,11 @@ def limpar_cache(usuario_id: str | None = None) -> None:
     if usuario_id is None:
         _cache.clear()
         _isento_cache.clear()
+        _role_cache.clear()
     else:
         _cache.pop(usuario_id, None)
         _isento_cache.pop(usuario_id, None)
+        _role_cache.pop(usuario_id, None)
 
 
 def sem_cota() -> bool:
@@ -106,6 +108,41 @@ async def eh_isento_por_id(usuario_id: str) -> bool:
         return False
     _isento_cache[usuario_id] = (agora + _ISENTO_CACHE_SEG, isento)
     return isento
+
+
+#: O papel muda raramente (só um admin promove/rebaixa alguém), então a janela
+#: pode ser maior que a da isenção: aqui o custo de errar é um bot do operador
+#: parado por 60 s, não dinheiro.
+_ROLE_CACHE_SEG = 60.0
+_role_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def eh_admin_por_id(usuario_id: str) -> bool:
+    """A conta dona do agente é admin?
+
+    Só o worker pergunta isto (`_cota_do_dono` em `app/main.py`): a rota web já
+    sabe o papel pelo token, mas o worker só tem o `dono_id` que veio do
+    agente. Sem esta conferência, o agente do próprio operador era barrado pela
+    cota do plano `teste` dele — a mesma armadilha que travava o gerador de
+    prompt (item 12) para o admin.
+
+    Falha de banco aqui devolve False: o pior caso é o cota do plano valer,
+    que é o comportamento normal de quem paga.
+    """
+    if not settings.has_db:
+        return False
+    agora = time.monotonic()
+    guardado = _role_cache.get(usuario_id)
+    if guardado and guardado[0] > agora:
+        return guardado[1]
+    try:
+        perfil = await repo.obter_perfil(usuario_id)
+        eh_admin = str((perfil or {}).get("role") or "") == "admin"
+    except Exception as e:  # noqa: BLE001
+        log.warning("Nao consegui checar o papel de %s: %s", usuario_id, e)
+        return False
+    _role_cache[usuario_id] = (agora + _ROLE_CACHE_SEG, eh_admin)
+    return eh_admin
 
 
 # --------------------------------------------------------------------------
@@ -168,12 +205,25 @@ async def assinatura_atual(usuario_id: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-async def exigir_cota_agentes(usuario_id: str) -> None:
-    """Chamar antes de criar um agente. 402 quando não cabe."""
-    if sem_cota():
+async def exigir_cota_agentes(usuario_id: str, eh_admin: bool = False) -> None:
+    """Chamar antes de criar um agente. 402 quando não cabe.
+
+    Três camadas, nesta ordem: quem não tem cota nenhuma (admin e isento) sai
+    antes de qualquer leitura; um período vencido é barrado pelo motivo certo
+    ("seu plano acabou"); e só o que sobra é teto de quantidade. Sem a camada do
+    meio, um `teste` de 7 dias continuava criando agente depois de expirado,
+    porque o status da assinatura não era consultado aqui.
+    """
+    if sem_cota() or eh_admin:
         return
-    p = await plano_atual(usuario_id)
+    if await eh_isento_por_id(usuario_id):
+        return
     assinatura = await assinatura_atual(usuario_id)
+    if (assinatura.get("status") or "ativo") in ("cancelado", "expirado"):
+        raise HTTPException(402, _msg_limite(
+            assinatura, "", "seus agentes e canais", "criar outro agente",
+        ))
+    p = await plano_atual(usuario_id)
     usados = await contar_agentes(usuario_id)
     if usados < p.max_agentes:
         return
@@ -185,12 +235,22 @@ async def exigir_cota_agentes(usuario_id: str) -> None:
     ))
 
 
-async def exigir_cota_canais(usuario_id: str, usados: int) -> None:
-    """Chamar antes de criar um canal. `usados` = canais que o agente já tem."""
-    if sem_cota():
+async def exigir_cota_canais(usuario_id: str, usados: int, eh_admin: bool = False) -> None:
+    """Chamar antes de criar um canal. `usados` = canais que o agente já tem.
+
+    Mesmo desenho de `exigir_cota_agentes`: isento/admin sem cota, período
+    vencido barrado pelo motivo certo, e o teto só para quem paga.
+    """
+    if sem_cota() or eh_admin:
         return
-    p = await plano_atual(usuario_id)
+    if await eh_isento_por_id(usuario_id):
+        return
     assinatura = await assinatura_atual(usuario_id)
+    if (assinatura.get("status") or "ativo") in ("cancelado", "expirado"):
+        raise HTTPException(402, _msg_limite(
+            assinatura, "", "seus canais", "ligar mais um canal",
+        ))
+    p = await plano_atual(usuario_id)
     if usados < p.max_canais_por_agente:
         return
     raise HTTPException(402, _msg_limite(
@@ -311,6 +371,11 @@ async def contexto(usuario_id: str, eh_admin: bool = False) -> dict:
                            "max_canais_por_agente": 0,
                            "max_mensagens_por_agente_mes": 0, "admin": True}
         resumo["agentes"] = {"usados": 0, "limite": 0, "admin": True}
+        # `sem_cota` é o sinal que `_exigir_plano` (app/chat_interno.py) lê para
+        # liberar um recurso pago. Sem ele, o admin — que tem assinatura no
+        # plano `teste` — recebia 403 no gerador de prompt (item 12), que pede
+        # Pro: foi exatamente o que aconteceu em produção.
+        resumo["sem_cota"] = True
     elif await eh_isento_por_id(usuario_id):
         # Conta isenta: mesmo desenho do admin, mas com o plano do teto do
         # catálogo — o gerador (plano_minimo=Pro) fica aberto sem checkout.
@@ -319,6 +384,9 @@ async def contexto(usuario_id: str, eh_admin: bool = False) -> dict:
                            "max_canais_por_agente": 0,
                            "max_mensagens_por_agente_mes": 0, "isento": True}
         resumo["agentes"] = {"usados": 0, "limite": 0, "isento": True}
+        # Mesmo sinal do admin: o isento passa por `_plano_maximo()` e abriria
+        # o gerador por acaso, não por direito. Fica explícito.
+        resumo["sem_cota"] = True
     resumo["catalogo"] = cobranca.catalogo_para_json()
     resumo["mensagens_excedentes"] = _tabela_excedentes()
     return resumo

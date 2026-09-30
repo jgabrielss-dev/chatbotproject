@@ -227,16 +227,22 @@ async function resolverCanal(familia: Familia, identificador: string) {
 }
 
 async function conferirAssinatura(req: Request, corpo: string, cfg: Record<string, any>) {
-  const segredo = String(cfg?.app_secret ?? "");
+  const segredo = String(cfg?.app_secret ?? cfg?.appSecret ?? "");
   if (!segredo) {
-    // Sem app_secret não dá para validar X-Hub-Signature-256. Registrado no log
-    // porque isso significa que qualquer um pode forjar um evento.
-    console.warn(
-      JSON.stringify({ rota: "meta", alerta: "app_secret ausente: assinatura do webhook não validada" }),
-    );
-    return true;
+    // Sem app_secret não dá para validar X-Hub-Signature-256, e devolver
+    // "autenticado" aqui aceitava QUALQUER POST como se fosse a Meta falando:
+    // quem achasse a URL da função (ela é pública por definição) forjava
+    // mensagens no nome do cliente, com o bot respondendo. Antes isso só
+    // aparecia no log.
+    console.error(JSON.stringify({
+      rota: "meta",
+      alerta: "app_secret ausente: webhook RECUSADO, não é possível validar a assinatura",
+    }));
+    return false;
   }
-  const cabecalho = req.headers.get("x-hub-signature-256") ?? "";
+  const cabecalho = req.headers.get("x-hub-signature-256")
+    ?? req.headers.get("x-hub-signature")
+    ?? "";
   const chave = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(segredo),
@@ -248,7 +254,15 @@ async function conferirAssinatura(req: Request, corpo: string, cfg: Record<strin
   const esperado = "sha256=" + Array.from(new Uint8Array(mac))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-  return cabecalho === esperado;
+  // Comparação em tempo constante: a resposta 401 vs 403 sairia em tempos
+  // diferentes conforme o quanto do digest bate, o que dá ao atacante o
+  // prefixo certo por tentativa.
+  const a = new TextEncoder().encode(cabecalho);
+  const b = new TextEncoder().encode(esperado);
+  if (a.length !== b.length) return false;
+  let dif = 0;
+  for (let i = 0; i < a.length; i++) dif |= a[i] ^ b[i];
+  return dif === 0;
 }
 
 // Verificação de webhook que o Meta faz via GET (subscribe).
@@ -323,6 +337,71 @@ function normalizarEventos(familia: Familia, parsed: any): EventoNormalizado[] {
   return saida;
 }
 
+// ---------------------------------------------------------------------------
+// Mídia dos canais oficiais (item 15)
+// ---------------------------------------------------------------------------
+//
+// A Meta não manda os bytes: manda o `id` da mídia, e a URL só sai da Graph API
+// depois, autenticada com o token do canal. Por isso o que vai para a fila é
+// `{"ref": "<id>"}` — que é exatamente o que `app/midia.py::de_ref` e
+// `meta_oficial.baixar_anexo` entendem. Baixar aqui gastaria banda da função e
+// exigiria o token da Meta em mais um lugar.
+const META_MIDIAS: Record<string, string> = {
+  image: "imagem",
+  audio: "audio",
+  video: "video",
+  document: "documento",
+  sticker: "sticker",
+};
+
+function tipoDoMime(mime: string): string {
+  const m = mime.toLowerCase();
+  if (m.startsWith("image/")) return "imagem";
+  if (m.startsWith("audio/")) return "audio";
+  if (m.startsWith("video/")) return "video";
+  return "documento";
+}
+
+function extrairMidiaMeta(familia: Familia, mensagem: any) {
+  if (familia === "whatsapp") {
+    for (const [chave, rotulo] of Object.entries(META_MIDIAS)) {
+      const item = mensagem?.[chave];
+      if (!item || typeof item !== "object") continue;
+      const ref = String(item.id ?? "");
+      if (!ref) continue;
+      const mime = String(item.mime_type ?? "");
+      return {
+        legenda: String(item.caption ?? ""),
+        descricao: `[${rotulo} do cliente]`,
+        anexo: {
+          tipo: tipoDoMime(mime || rotulo),
+          mime_type: mime || "application/octet-stream",
+          filename: String(item.filename ?? `${chave}.bin`),
+          ref,
+        },
+      };
+    }
+    return null;
+  }
+  // Instagram: os anexos chegam como lista em `message.attachments`, com a URL
+  // já pronta (a Meta entrega URL temporária assinada).
+  const anexos = mensagem?.message?.attachments ?? [];
+  if (!Array.isArray(anexos) || anexos.length === 0) return null;
+  const primeiro = anexos[0];
+  const url = String(primeiro?.payload?.url ?? "");
+  if (!url) return null;
+  const tipo = String(primeiro?.type ?? "image").toLowerCase();
+  return {
+    legenda: "",
+    descricao: `[${META_MIDIAS[tipo] ?? tipo} do cliente]`,
+    anexo: {
+      tipo: tipo === "image" ? "imagem" : tipo === "audio" ? "audio" : tipo === "video" ? "video" : "documento",
+      mime_type: tipo === "image" ? "image/jpeg" : tipo === "audio" ? "audio/mpeg" : tipo === "video" ? "video/mp4" : "application/octet-stream",
+      url,
+    },
+  };
+}
+
 async function handleMetaMensagem(familia: Familia, req: Request) {
   const corpo = await req.text();
   let parsed: any = {};
@@ -366,17 +445,28 @@ async function handleMetaMensagem(familia: Familia, req: Request) {
     if (mensagem?.message?.is_deleted === true) continue;
     if (mensagem?.message?.is_unsupported === true) continue;
 
-    const texto = familia === "whatsapp" ? mensagem?.text?.body : mensagem?.message?.text;
+    // Item 15 nos canais OFICIAIS: a mídia vem no mesmo evento do texto e tem
+    // que virar anexo. Sem esta linha, "foto sem legenda" — que e a maioria
+    // das fotos de print de erro que o cliente manda — era descartada por
+    // `if (!texto)` e o bot nunca via a imagem. O `ref` (id da mídia) é o que
+    // o worker resolve pela Graph API usando o token do canal, então não é
+    // preciso baixar nada aqui.
+    const midia = extrairMidiaMeta(familia, mensagem);
+    const legenda = familia === "whatsapp"
+      ? String(mensagem?.text?.body ?? midia?.legenda ?? "")
+      : String(mensagem?.message?.text ?? midia?.legenda ?? "");
     const de = familia === "whatsapp" ? String(mensagem?.from ?? "") : String(mensagem?.sender?.id ?? "");
     const origemId = familia === "whatsapp" ? String(mensagem?.id ?? "") : String(mensagem?.message?.mid ?? "");
-    if (!texto || !de || !origemId) continue;
+    if ((!legenda && !midia) || !de || !origemId) continue;
 
     const r = await enfileirar({
       canal_id: canal.id,
       remetente: de,
-      texto: String(texto).slice(0, 4000),
+      texto: String(legenda || midia?.descricao || "").slice(0, 4000),
       origem: `${familia === "whatsapp" ? "wamo" : "igmo"}:${origemId}`,
-      payload_json: mensagem,
+      // A chave `anexo` é o que `app/main.py::_anexos_do_item` procura. A
+      // mensagem inteira continua em `payload_json` para depuração.
+      payload_json: midia ? { ...mensagem, anexo: midia.anexo } : mensagem,
       status: "pendente",
     });
     console.log("inbox", JSON.stringify({

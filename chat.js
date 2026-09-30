@@ -110,8 +110,13 @@
 
   function carregarHistorico(chat) {
     if (!chat.opcoes.comHistorico) return Promise.resolve();
+    // Mesmo cabecalho do `postar`: o historico de um atendente que exige conta
+    // (o suporte do painel, item 13) responde 401 sem isso — e o `!r.ok`
+    // abaixo devolvia lista vazia em silencio, entao o F5 apagava a conversa
+    // na tela sem nenhuma mensagem de erro.
     return fetch(Auth.API_BASE + "/api/interno/" + chat.chave
-                 + "/historico?sessao=" + encodeURIComponent(chat.sessao))
+                 + "/historico?sessao=" + encodeURIComponent(chat.sessao),
+                 { headers: Auth.cabecalhoAuth() })
       .then(function (r) {
         if (!r.ok) return { mensagens: [] };
         return r.json();

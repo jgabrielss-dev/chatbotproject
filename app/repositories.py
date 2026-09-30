@@ -821,15 +821,24 @@ async def listar_caixa_para_processar(limite: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def marcar_caixa_processando(msg_id: int) -> None:
+async def marcar_caixa_processando(msg_id: int) -> bool:
+    """Reserva a mensagem para este worker. Devolve False se outro já pegou.
+
+    A reserva é o que impede dois workers de responderem a mesma mensagem ao
+    cliente final (cada um gastaria uma chamada de IA e o customer veria a
+    resposta duas vezes). O SELECT da fila e o UPDATE são operações separadas,
+    então a janela existe; fechá-la é exigir que a linha ainda esteja
+    'pendente'/'erro' no UPDATE e usar o RETURNING para saber quem ganhou.
+    """
     pool = await get_pool()
     async with pool.acquire() as con:
-        await con.execute(
+        row = await con.fetchrow(
             """UPDATE caixa_entrada
                SET status = 'processando', tentativas = tentativas + 1, processando_em = now()
-               WHERE id = $1""",
+               WHERE id = $1 AND status IN ('pendente', 'erro') RETURNING id""",
             msg_id,
         )
+    return row is not None
 
 
 async def reenfileirar_processando(tolerancia_segundos: int = 600) -> int:
@@ -902,7 +911,14 @@ async def resumo_caixa(limite: int = 10, dono_id: str | None = None) -> dict:
     # O join é sempre necessário: é ele que liga a fila ao dono. Sem dono
     # (admin) o filtro fica vazio e o join não restringe nada — o agente é
     # removido em cascata junto com o canal, então o inner join não oculta fila.
-    join_dono = " JOIN agentes a ON a.id = c.canal_id"
+    #
+    # A caminho da fila é `caixa_entrada.canal_id` -> `canais.id` ->
+    # `canais.agente_id` -> `agentes.id`. Casar `a.id` direto com `c.canal_id`
+    # (o que estava aqui) compara um id de canal com um id de agente: os dois
+    # são sequenciais e independentes, então o filtro deixava passar a fila de
+    # um cliente para o dono do agente de MESMO número — o `texto` e o
+    # `remetente` de conversa de terceiro na tela de quem pagou.
+    join_dono = " JOIN canais k ON k.id = c.canal_id JOIN agentes a ON a.id = k.agente_id"
     filtro_dono = ""
     params_extra: list[Any] = []
     if dono_id is not None:
@@ -962,7 +978,9 @@ async def estatisticas_do_dono(dono_id: str | None) -> dict:
                      JOIN sessoes s ON s.id = m.sessao_id
                      JOIN agentes a ON a.id = s.agente_id
                     WHERE 1 = 1{filtro}) AS mensagens,
-                  (SELECT count(*) FROM caixa_entrada c JOIN agentes a ON a.id = c.canal_id
+                  (SELECT count(*) FROM caixa_entrada c
+                     JOIN canais k ON k.id = c.canal_id
+                     JOIN agentes a ON a.id = k.agente_id
                     WHERE c.status IN ('pendente', 'processando', 'erro'){filtro}) AS fila_pendente,
                   (SELECT count(*) FROM mensagens m
                      JOIN sessoes s ON s.id = m.sessao_id

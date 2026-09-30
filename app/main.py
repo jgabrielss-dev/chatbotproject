@@ -29,6 +29,7 @@ from app import agentes_internos
 from app.channels import evolution, instagram, meta_oficial, telegram
 from app.config import settings
 from app.database import close_pool, get_pool
+from app import limites
 from app.limites import checar_mensagem, exigir_cota_agentes, exigir_cota_canais
 from app import midia
 from app.pipeline import processar_mensagem
@@ -58,6 +59,12 @@ CHAT_JS = RAIZ / "chat.js"
 # plano (app/limites.py -> exigir_cota_canais), porque um número fixo não
 # distingue quem comprou o Negócio de quem está no teste.
 MAX_CANAIS_POR_AGENTE = 5
+
+# Tentativas de IA antes de o backoff da fila parar de ser de minutos. Não
+# descarta a mensagem (ela nunca sai da fila, por desenho): só passa a tentar
+# de novo a cada horas, para que uma mensagem que sempre falha não vire uma
+# conta de Gemini ilimitada. Ver `_proxima_tentativa`.
+TENTATIVAS_IA_MAX = 5
 
 # Janela que o webhook generico espera o worker responder antes de devolver
 # "ainda na fila". O pedido NUNCA e perdido: expirado o prazo, a mensagem segue
@@ -452,10 +459,22 @@ async def _enviar_resposta(canal: dict, remetente: str, resposta: str) -> None:
 
 def _proxima_tentativa(tentativas: int) -> datetime:
     """Backoff para uma falha. A mensagem NUNCA sai da fila: ela volta para o
-    fim dela (proxima_tentativa no futuro) e é tentada de novo em ciclo."""
+    fim dela (proxima_tentativa no futuro) e é tentada de novo em ciclo.
+
+    Depois de `TENTATIVAS_IA_MAX` o intervalo continua crescendo, em vez de
+    ficar colado no teto de 5 minutos. O que faz o teto é o usuário esperar
+    minutos por uma resposta; o que faz uma mensagem envenenada (uma imagem
+    corrompida, um número que o provedor rejeita para sempre) é gastar uma
+    chamada de IA completa a cada 5 minutos, para sempre — sem teto de
+    tentativas, uma só mensagem comédia o orçamento do mês. Aqui ela continua
+    na fila (nada se perde) e volta a cada ~8 h.
+    """
     base = settings.inbox_backoff_base_seg
     teto = settings.inbox_backoff_teto_seg
     atraso = min(base * (2 ** min(tentativas - 1, 6)), teto)
+    if tentativas > TENTATIVAS_IA_MAX:
+        atraso = min(teto * (4 ** (tentativas - TENTATIVAS_IA_MAX - 1)),
+                     settings.inbox_backoff_teto_seg * 4 ** 3)
     return datetime.now(timezone.utc) + timedelta(seconds=atraso)
 
 
@@ -476,7 +495,10 @@ async def _processar_caixa(limite: int | None = None) -> None:
             continue
         # O canal "webhook" tambem passa pelo worker: a rota so enfileira e
         # espera. Pular aqui marcaria sem_resposta sem nunca gerar a resposta.
-        await repo.marcar_caixa_processando(item["id"])
+        if not await repo.marcar_caixa_processando(item["id"]):
+            # Outro worker pegou esta mensagem entre o SELECT da fila e agora.
+            continue
+
         # Cota do item 9, checada ANTES de chamar a IA: a resposta que estoura
         # o limite é entregue ao cliente final em vez de ser descartada, e a
         # mensagem sai da fila como 'respondido' para não ficar reprocessando
@@ -517,16 +539,23 @@ async def _processar_caixa(limite: int | None = None) -> None:
 async def _cota_do_dono(canal: dict) -> tuple[bool, str]:
     """O agente deste canal ainda tem cota? Devolve (liberada, aviso).
 
-    `dono_id` nulo = agente legado, sem dono, que só o admin enxerga: não há
-    assinatura, então não há o que barrar.
+    O dono vem do AGENTE, nunca do canal: `dono_id` é coluna de `agentes` e
+    `obter_canal` não a traz. Ler `canal.get("dono_id")` devolvia sempre None,
+    então esta função devolvia sempre "liberada" e `checar_mensagem` nunca era
+    chamada — ou seja, nenhuma mensagem de WhatsApp/Instagram/Telegram conferia
+    cota: plano expirado seguia respondendo e ninguém batia no limite do mês.
+
+    `dono_id` nulo = agente legado sem dono, que só o admin enxerga: não há
+    assinatura, então não há o que barrar. Agente de conta isenta e de admin
+    passam dentro do `checar_mensagem`, que já devolve liberado para os dois.
     """
-    dono = canal.get("dono_id")
-    if not dono:
-        return True, ""
     agente = await repo.obter_agente(canal["agente_id"], None)
     if not agente:
         return True, ""
-    return await checar_mensagem(dono, agente["id"])
+    dono = agente.get("dono_id")
+    if not dono:
+        return True, ""
+    return await checar_mensagem(dono, agente["id"], await limites.eh_admin_por_id(dono))
 
 
 async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
@@ -876,9 +905,16 @@ app.add_middleware(
 # quem ainda nao tem conta, e e ali que a venda acontece. Nao ha nada sensivel
 # nela (so o catalogo, e so os planos pagos).
 _ROTAS_PUBLICAS = ("/", "/login", "/health", "/admin", "/painel", "/api/config",
-                   "/auth.js", "/style.css", "/chat.js", "/api/planos",
-                   "/api/webhooks/mercadopago")
+                   "/api/planos", "/api/webhooks/mercadopago")
 _PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
+
+#: Arquivos que o HTML pede antes de existir sessão. Lista fechada: é a
+#: exceção à regra "toda rota sem sessão leva 401", então ela não pode ser um
+#: padrão de nome (`*.js`) que a próxima rota sensível herdaria sozinha.
+_ASSETS_PUBLICOS = frozenset({
+    "/auth.js", "/chat.js", "/style.css", "/favicon.ico", "/favicon.png",
+    "/logo.png", "/manifest.json",
+})
 
 
 def _eh_publica(caminho: str) -> bool:
@@ -922,7 +958,13 @@ async def exigir_login(request: Request, call_next):
     caminho = request.url.path
     # Os assets sao publicos por definicao (o HTML ja os pede antes de haver
     # sessao) e por serem arquivos estaticos de uma tela de login.
-    if caminho.endswith((".js", ".css", ".png", ".svg", ".ico")):
+    #
+    # A lista é FECHADA de propósito. Com `endswith((".js", ...))`, qualquer
+    # rota futura que terminasse em `.js` — um relatório, um export — herdaria
+    # a exceção e responderia sem sessão. O middleware é o portão de segurança
+    # do projeto, então a exceção tem que ser uma lista escrita à mão, não um
+    # padrão de nome de arquivo.
+    if caminho in _ASSETS_PUBLICOS:
         return await call_next(request)
     if _eh_publica(caminho) or request.method == "OPTIONS":
         return await call_next(request)
@@ -1064,14 +1106,52 @@ async def health():
 # Webhooks públicos (entrada de mensagens dos canais)
 # --------------------------------------------------------------------------
 
+#: Teto do corpo de um webhook. A URL do webhook é pública por definição (o
+#: provedor precisa dela), então o corpo precisa de limite: sem ele, qualquer um
+#: com a URL manda um POST gigante e o servidor faz trabalho à toa.
+LIMITE_CORPO_WEBHOOK = 256 * 1024
+
+#: Texto de mensagem que vai para a fila. Mais que isso é lixo de webhook ou
+#: alguém colando um documento inteiro; o agente não ganha com o resto.
+LIMITE_TEXTO_MENSAGEM = 8000
+
+
+async def _json_do_webhook(request: Request) -> dict:
+    """Corpo do webhook como objeto JSON, com teto de tamanho.
+
+    `request.json()` estoura 500 em corpo inválido e não tem limite de tamanho.
+    Aqui as duas viram 4xx, que é o que o provedor entende como "não é para
+    repetir" e o que o painel de logs mostra como erro de integração, não como
+    falha do servidor.
+    """
+    bruto = await request.body()
+    if len(bruto) > LIMITE_CORPO_WEBHOOK:
+        raise HTTPException(413, "Corpo grande demais para um webhook.")
+    try:
+        dados = json.loads(bruto or b"{}")
+    except ValueError:
+        raise HTTPException(400, "Corpo do webhook não é JSON.") from None
+    if not isinstance(dados, dict):
+        raise HTTPException(400, "Corpo do webhook não é um objeto JSON.")
+    return dados
+
+
+def _texto_da_mensagem(valor: str | None) -> str:
+    return (valor or "")[:LIMITE_TEXTO_MENSAGEM]
+
+
 @app.post("/webhook/telegram/{canal_id}/{secret}")
 async def webhook_telegram(canal_id: int, secret: str, request: Request):
-    payload = await request.json()
+    # O segredo é conferido ANTES de ler o corpo: sem esta ordem, quem não tem
+    # a URL do canal ainda obrigava o servidor a parsear um corpo arbitrário.
     canal = await repo.obter_canal(canal_id)
     if not canal or canal["tipo"] != "telegram":
         return JSONResponse({"ok": False}, status_code=404)
     if not _secret_igual(secret, canal["config"].get("secret", "")):
         return JSONResponse({"ok": False}, status_code=404)
+    if not canal["ativo"]:
+        return JSONResponse({"ok": True, "ignorado": "canal pausado"})
+    payload = await _json_do_webhook(request)
 
     texto, chat_id = telegram.extrair_mensagem(payload)
     # Item 15: a legenda de um anexo é o texto da mensagem. Sem isto, "isso aqui
@@ -1081,10 +1161,15 @@ async def webhook_telegram(canal_id: int, secret: str, request: Request):
     if anexo and not texto:
         msg = payload.get("message") or {}
         texto = msg.get("caption") or ""
-    if chat_id and (texto or anexo):
+    update_id = payload.get("update_id")
+    if chat_id and (texto or anexo) and update_id is not None:
+        # `origem` nunca pode ser degenerada: o índice único é
+        # (canal_id, origem), então "tg:None" faria TODAS as mensagens
+        # seguintes deste canal colidirem entre si e serem descartadas em
+        # silêncio. Sem id de evento não há deduplicação possível -> 400.
         await repo.salvar_na_caixa(
-            canal_id, chat_id, texto or midia.descrever(anexo),
-            origem=f"tg:{payload.get('update_id')}",
+            canal_id, chat_id, _texto_da_mensagem(texto) or midia.descrever(anexo),
+            origem=f"tg:{update_id}",
             payload={**payload, "anexo": anexo} if anexo else payload,
         )
     return JSONResponse({"ok": True})
@@ -1100,18 +1185,28 @@ def _norm_evento(v: str | None) -> str:
 
 @app.post("/webhook/evolution/{canal_id}/{secret}")
 async def webhook_evolution(canal_id: int, secret: str, request: Request):
-    payload = await request.json()
     canal = await repo.obter_canal(canal_id)
     if not canal or canal["tipo"] != "whatsapp":
         return JSONResponse({"ok": False}, status_code=404)
     cfg = canal["config"]
     if not _secret_igual(secret, cfg.get("secret", "")):
         return JSONResponse({"ok": False}, status_code=404)
+    payload = await _json_do_webhook(request)
+    # Canal pausado não enfileira mensagem (o worker a reprocessaria para
+    # sempre, sem nunca responder), mas QR e estado da conexão continuam
+    # passando: são configuração, não atendimento, e sem eles o dono pausado
+    # não conseguiria reconectar o WhatsApp.
+    if not canal["ativo"] and not _norm_evento(payload.get("event")).startswith(
+        ("QRCODE", "CONNECTION")
+    ):
+        return JSONResponse({"ok": True, "ignorado": "canal pausado"})
 
     evento = _norm_evento(payload.get("event"))
 
     if evento == "QRCODE_UPDATED":
-        dados = payload.get("data", {})
+        dados = payload.get("data") or {}
+        if not isinstance(dados, dict):
+            return JSONResponse({"ok": True})
         qr_dados = dados.get("qrcode") or dados
         qr = _qr_strip(qr_dados.get("base64") or qr_dados.get("code"))
         if qr:
@@ -1120,7 +1215,8 @@ async def webhook_evolution(canal_id: int, secret: str, request: Request):
         return JSONResponse({"ok": True})
 
     if evento == "CONNECTION_UPDATE":
-        estado = payload.get("data", {}).get("state", "")
+        dados = payload.get("data") or {}
+        estado = dados.get("state", "") if isinstance(dados, dict) else ""
         await repo.patch_canal_config(canal_id, "status", estado)
         if estado == "open":
             await repo.patch_canal_config(canal_id, "qr", "")
@@ -1133,10 +1229,10 @@ async def webhook_evolution(canal_id: int, secret: str, request: Request):
     anexo = evolution.extrair_anexo(dados or {})
     if not texto and anexo:
         texto = ((anexo or {}).get("legenda") or "")
-    if numero and (texto or anexo):
-        key_id = (dados.get("key") or {}).get("id") or ""
+    key_id = ((dados or {}).get("key") or {}).get("id") or ""
+    if numero and (texto or anexo) and key_id:
         await repo.salvar_na_caixa(
-            canal_id, numero, texto or midia.descrever(anexo),
+            canal_id, numero, _texto_da_mensagem(texto) or midia.descrever(anexo),
             origem=f"wa:{key_id}",
             payload={**(dados or {}), "anexo": anexo} if anexo else dados,
         )
@@ -1156,10 +1252,12 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
     if not _secret_igual(secret, canal["config"].get("secret", "")):
         return JSONResponse({"ok": False}, status_code=404)
 
-    payload = await request.json()
+    payload = await _json_do_webhook(request)
+    if not canal["ativo"]:
+        return JSONResponse({"reply": "", "status": "canal_pausado"}, status_code=202)
     # aceita text/texto e user/remetente: um payload com a outra grafia nao pode
     # receber resposta vazia em silencio, que e a perda que a fila existe pra evitar
-    texto = str(payload.get("text") or payload.get("texto") or "").strip()
+    texto = _texto_da_mensagem(str(payload.get("text") or payload.get("texto") or "").strip())
     usuario = str(payload.get("user") or payload.get("remetente") or "anonimo").strip() or "anonimo"
     # Item 15: quem integra pode mandar `anexos` (foto, audio, video, arquivo).
     # A forma normalizada e a de `app/midia.py`; `_de_item_solto` aceita tambem
@@ -1171,10 +1269,16 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
         return JSONResponse({"reply": "", "status": "vazio"})
 
     # origem unica por requisicao: o indice unico (canal_id, origem) descartaria
-    # a segunda mensagem se duas requisições viessem com a origem vazia.
+    # a segunda mensagem se duas requisições viessem com a origem vazia. Quando
+    # o integrador manda um id de evento (`id`/`event_id`/`message_id`), ele e
+    # usado: ai um reenvio do mesmo evento (timeout do integrador, HTTP 202
+    # perdido) e deduplicado em vez de virar uma segunda resposta da IA.
+    origem = str(
+        payload.get("event_id") or payload.get("message_id") or payload.get("id") or ""
+    ).strip()
     msg_id = await repo.salvar_na_caixa(
         canal_id, usuario, texto or midia.descrever(anexos),
-        origem=f"web:{uuid.uuid4().hex}",
+        origem=f"web:{origem[:180]}" if origem else f"web:{uuid.uuid4().hex}",
         payload={**payload, "anexos": [m.para_dict() for m in anexos]} if anexos else payload,
     )
     if msg_id is None:
@@ -1185,8 +1289,12 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
         # status sempre presente: quem chama precisa saber responder bem ou esperar
         return JSONResponse({"reply": item["resposta"] or "", "status": "respondido"})
     if item and item["ultimo_erro"]:
-        # Falhou agora, mas continua na fila: o worker tenta de novo.
-        return JSONResponse({"reply": "", "status": "na_fila", "erro": item["ultimo_erro"]}, status_code=202)
+        # Falhou agora, mas continua na fila: o worker tenta de novo. O texto do
+        # erro NAO volta: e str(excecao) do Gemini/asyncpg/HTTP do terceiro,
+        # que pode trazer URL interna, chave ou trecho de prompt. Fica no log.
+        log.warning("Webhook generico do canal %s falhou agora: %s",
+                    canal_id, item["ultimo_erro"][:200])
+        return JSONResponse({"reply": "", "status": "na_fila"}, status_code=202)
     return JSONResponse({"reply": "", "status": "na_fila"}, status_code=202)
 
 
@@ -1218,7 +1326,7 @@ async def post_agente(request: Request):
         raise HTTPException(400, "Informe o system prompt.")
     # Cota do item 9 (quantos agentes o plano permite), antes de gravar: e
     # melhor recusar aqui do que criar e ter que apagar.
-    await exigir_cota_agentes(usuario.id)
+    await exigir_cota_agentes(usuario.id, usuario.eh_admin)
     # O dono é SEMPRE a conta logada. Ignorar um "dono_id" que venha no corpo é
     # proposital: se o campo fosse respeitado, bastaria trocar o uuid no corpo
     # para criar agente na conta de outro.
