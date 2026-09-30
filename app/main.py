@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -20,12 +21,16 @@ from app.auth import (
     ADMIN_EMERGENCIA,
     exigir_admin,
     exigir_nao_bloqueado,
+    exigir_segundo_fator,
     resolver_usuario,
     usuario_atual,
 )
+from app import agentes_internos
 from app.channels import evolution, instagram, meta_oficial, telegram
 from app.config import settings
 from app.database import close_pool, get_pool
+from app.limites import checar_mensagem, exigir_cota_agentes, exigir_cota_canais
+from app import midia
 from app.pipeline import processar_mensagem
 
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +52,11 @@ ADMIN_HTML = RAIZ / "admin.html"
 PAINEL_HTML = RAIZ / "painel.html"
 STYLE_CSS = RAIZ / "style.css"
 AUTH_JS = RAIZ / "auth.js"
+CHAT_JS = RAIZ / "chat.js"
+
+# Teto de canais por agente, aplicado SÓ ao admin. Para cliente o limite vem do
+# plano (app/limites.py -> exigir_cota_canais), porque um número fixo não
+# distingue quem comprou o Negócio de quem está no teste.
 MAX_CANAIS_POR_AGENTE = 5
 
 # Janela que o webhook generico espera o worker responder antes de devolver
@@ -256,15 +266,44 @@ def _canal_publico(canal: dict | None) -> dict | None:
 # Pipeline de entrada (compartilhado entre os canais)
 # --------------------------------------------------------------------------
 
-async def _tratar_mensagem(canal: dict, usuario_externo: str, texto: str):
+async def _tratar_mensagem(
+    canal: dict,
+    usuario_externo: str,
+    texto: str,
+    anexos: list[midia.Midia] | None = None,
+):
     # `None` como dono: este caminho é o worker interno, que processa a fila de
     # todos os tenants. Ele não é uma requisição de usuário, e o canal já veio
     # resolvido pela fila — não há nada a checar aqui.
     agente = await repo.obter_agente(canal["agente_id"], None)
     if not agente or not agente["ativo"]:
         return
-    resposta = await processar_mensagem(agente, canal, usuario_externo, texto)
+    resposta = await processar_mensagem(agente, canal, usuario_externo, texto, anexos)
     return resposta
+
+
+def _anexos_do_item(item: dict) -> list[midia.Midia]:
+    """Anexos de um item da fila, lidos do `payload_json`.
+
+    `payload_json` é genérico porque o webhook gravou o corpo cru do canal, e o
+    caminho do anexo é o que cada canal escreve. Por isso a lista de chaves é
+    explícita: um webhook de terceiro que não manda anexo cai em `normalizar([])`,
+    que devolve lista vazia em vez de erro.
+    """
+    bruto = item.get("payload_json")
+    if isinstance(bruto, str):
+        try:
+            bruto = json.loads(bruto)
+        except ValueError:
+            return []
+    if not isinstance(bruto, dict):
+        return []
+    for chave in ("anexo", "anexos", "attachment", "attachments", "midia", "media"):
+        if bruto.get(chave):
+            achados = midia.normalizar(bruto[chave])
+            if achados:
+                return achados
+    return []
 
 
 # --------------------------------------------------------------------------
@@ -438,9 +477,25 @@ async def _processar_caixa(limite: int | None = None) -> None:
         # O canal "webhook" tambem passa pelo worker: a rota so enfileira e
         # espera. Pular aqui marcaria sem_resposta sem nunca gerar a resposta.
         await repo.marcar_caixa_processando(item["id"])
+        # Cota do item 9, checada ANTES de chamar a IA: a resposta que estoura
+        # o limite é entregue ao cliente final em vez de ser descartada, e a
+        # mensagem sai da fila como 'respondido' para não ficar reprocessando
+        # para sempre e queimando cota de novo.
+        liberada, aviso = await _cota_do_dono(canal)
+        if not liberada:
+            try:
+                await _enviar_resposta(canal, item["remetente"], aviso)
+                await repo.concluir_caixa(item["id"], "respondido", aviso)
+            except Exception as e:
+                log.exception("Falha ao avisar cota estourada no canal %s: %s",
+                              canal["id"], e)
+                await repo.falhar_caixa(item["id"], _proxima_tentativa(item["tentativas"] + 1),
+                                        str(e))
+            continue
         try:
             resposta = await _tratar_mensagem(
-                canal, _prefixo_usuario(canal, item["remetente"]), item["texto"]
+                canal, _prefixo_usuario(canal, item["remetente"]), item["texto"],
+                _anexos_do_item(item),
             )
         except Exception as e:
             log.exception("Falha ao gerar resposta (inbox %s): %s", item["id"], e)
@@ -457,6 +512,21 @@ async def _processar_caixa(limite: int | None = None) -> None:
             continue
         await repo.concluir_caixa(item["id"], "respondido", resposta)
         log.info("Inbox %s respondida no canal %s (de %s)", item["id"], canal["id"], item["remetente"])
+
+
+async def _cota_do_dono(canal: dict) -> tuple[bool, str]:
+    """O agente deste canal ainda tem cota? Devolve (liberada, aviso).
+
+    `dono_id` nulo = agente legado, sem dono, que só o admin enxerga: não há
+    assinatura, então não há o que barrar.
+    """
+    dono = canal.get("dono_id")
+    if not dono:
+        return True, ""
+    agente = await repo.obter_agente(canal["agente_id"], None)
+    if not agente:
+        return True, ""
+    return await checar_mensagem(dono, agente["id"])
 
 
 async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
@@ -493,9 +563,17 @@ async def _sincronizar_evolution(intervalo: float = 30.0) -> None:
                 maior_ts = marco
                 for msg in novas:
                     if msg["ts"] > marco:
+                        # Anexo pela MESMA porta do texto: a sincronizacao é a
+                        # rede que recupera mensagem perdida quando o webhook
+                        # caiu, e um anexo perdido por ali é tão perdido quanto
+                        # um texto.
+                        bruto = msg["dados"] or {}
+                        anexo = evolution.extrair_anexo(bruto)
                         await repo.salvar_na_caixa(
-                            canal["id"], msg["numero"], msg["texto"],
-                            origem=f"wa:{msg['origem_id']}", payload=msg["dados"],
+                            canal["id"], msg["numero"],
+                            msg["texto"] or midia.descrever(anexo),
+                            origem=f"wa:{msg['origem_id']}",
+                            payload={**bruto, "anexo": anexo} if anexo else bruto,
                         )
                         if msg["ts"] > maior_ts:
                             maior_ts = msg["ts"]
@@ -667,6 +745,41 @@ async def _reconciliar_webhook_telegram(canal: dict) -> None:
         log.warning("Falha ao reconferir o webhook do Telegram do canal %s: %s", canal["id"], e)
 
 
+async def _sincronizar_planos() -> None:
+    """Escreve `app.cobranca.CATALOGO` na tabela `planos` (UPSERT).
+
+    Idempotente, então roda em todo boot. Se a tabela não existir ainda (base
+    sem a migration 0005), avisa e segue: o app continua de pé e o painel
+    mostra o plano padrão, em vez de subir todo mundo com 500.
+    """
+    from app import cobranca
+    from app import repos_cobranca as rc
+
+    await rc.sincronizar_planos(cobranca.CATALOGO)
+    total = await rc.contar_planos()
+    log.info("Catalogo de planos sincronizado: %s plano(s).", total)
+
+
+async def _garantir_agentes_internos() -> None:
+    """Cria agente + canal 'site' de cada agente interno (itens 7, 12, 13).
+
+    Roda no boot e é idempotente pelo `interno`, então subir de novo não cria um
+    agente novo nem perde o histórico de quem já conversou. Sem isso aqui, a
+    home cairia em 503 até alguém rodar a migration na mão — e a home é a tela
+    que o Render mostra para o dono do serviço no primeiro acesso.
+
+    Falha aqui NÃO derruba o boot: um site com a home fora do ar é ruim, mas um
+    site que não sobe por causa de um INSERT é pior — o painel do cliente
+    continua funcionando e o erro fica no log.
+    """
+    pares = await repo.garantir_agentes_internos([
+        (a.chave, a.nome, a.prompt) for a in
+        (agentes_internos.PRODUTO, agentes_internos.SUPORTE,
+         agentes_internos.PROMPT_AGENTE)
+    ])
+    log.info("Agentes internos prontos: %s", ", ".join(p["agente"]["nome"] for p in pares))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _worker_caixa_task, _heartbeat_task
@@ -675,6 +788,21 @@ async def lifespan(app: FastAPI):
     _heartbeat_task = asyncio.create_task(_heartbeat())
     if settings.has_db:
         await get_pool()
+        # O catalogo de planos vai para o banco antes de qualquer worker: sem
+        # isso, a primeira conta que se cadastrar quebra em "violates foreign
+        # key" na assinatura, e o erro aparece como 500 no cadastro em vez de
+        # como "faltou rodar a migration".
+        try:
+            await _sincronizar_planos()
+        except Exception as e:
+            log.error("Falha ao sincronizar o catalogo de planos: %s", e)
+        # Depois do catálogo: o agente da home tem o catálogo no prompt, mas
+        # isso não é dependência de banco. A ordem só é para o log de boot
+        # contar os dois na mesma sequência em toda subida.
+        try:
+            await _garantir_agentes_internos()
+        except Exception as e:
+            log.warning("Agentes internos indisponiveis: %s", e)
         _worker_caixa_task = asyncio.create_task(_worker_caixa())
         # Só há tarefa de fundo nos canais NÃO OFICIAIS. Os oficiais são
         # 100% push (webhook), então nada de polling/keepalive: é isso que
@@ -704,8 +832,12 @@ app = FastAPI(title="Chatbot Project SaaS", lifespan=lifespan)
 # separadas das de administracao que ficam aqui. Importar depois de criar o
 # `app` evita ciclo, porque painel.py nao importa o main.
 from app import painel as painel_router  # noqa: E402
+from app import rotas_cobranca as cobranca_router  # noqa: E402
+from app import chat_interno as chat_interno_router  # noqa: E402
 
 app.include_router(painel_router.router)
+app.include_router(cobranca_router.router)
+app.include_router(chat_interno_router.router)
 
 # Os assets sao servidos por rota, e nao por mount de diretorio. Montar a raiz
 # do repo inteiro publicaria .env, .git, os .py e o schema.sql; servir so os
@@ -722,6 +854,11 @@ async def asset_auth_js():
 async def asset_style_css():
     return FileResponse(STYLE_CSS, media_type="text/css")
 
+
+@app.get("/chat.js", include_in_schema=False)
+async def asset_chat_js():
+    return FileResponse(CHAT_JS, media_type="application/javascript")
+
 # A pagina tambem pode ser hospedada no GitHub Pages, entao liberamos CORS
 # para que o navegador consiga chamar esta API de outra origem.
 app.add_middleware(
@@ -735,13 +872,32 @@ app.add_middleware(
 # do HTML; os dados exigem conta), o health check do Render, a config do front e
 # os webhooks, que tem segredo proprio na propria rota. TODO o resto exige
 # usuario logado.
+# "/api/planos" e publica de proposito: a home mostra a tabela de precos para
+# quem ainda nao tem conta, e e ali que a venda acontece. Nao ha nada sensivel
+# nela (so o catalogo, e so os planos pagos).
 _ROTAS_PUBLICAS = ("/", "/login", "/health", "/admin", "/painel", "/api/config",
-                   "/auth.js", "/style.css")
+                   "/auth.js", "/style.css", "/chat.js", "/api/planos",
+                   "/api/webhooks/mercadopago")
 _PREFIXOS_PUBLICOS = ("/static/", "/webhook/")
 
 
 def _eh_publica(caminho: str) -> bool:
     if caminho in _ROTAS_PUBLICAS or caminho.startswith(_PREFIXOS_PUBLICOS):
+        return True
+    # O chat do agente da home (item 7) é público: é a venda. A lista de quem
+    # são os agentes internos também, porque a home tem que descrever o
+    # atendente antes de a pessoa falar com ele.
+    #
+    # Só o `produto` fica de fora do login, e a lista é montada a partir de
+    # `exige_login` em vez de escrita à mão aqui: é o que impede que uma
+    # configuração nova de agente interno vire um buraco no meio, e o que impede
+    # que o suporte, que mexe na conta de quem loga, fique público por engano.
+    for _c in (caminho, caminho[:-len("/historico")] if caminho.endswith("/historico") else ""):
+        if _c.startswith("/api/interno/") and _c[len("/api/interno/"):] in (
+            chave for chave, a in agentes_internos.AGENTES.items() if not a.exige_login
+        ):
+            return True
+    if caminho == "/api/interno/agentes":
         return True
     # "/admin.html", "/login/" e companhia precisam contar como as mesmas rotas.
     # Sem isso o middleware devolvia 401 em JSON e o browser pintava uma tela
@@ -794,6 +950,14 @@ async def exigir_login(request: Request, call_next):
     if usuario.bloqueado:
         return JSONResponse({"detail": "Conta bloqueada. Fale com o administrador."},
                             status_code=403)
+    # Aqui e nao dentro de cada rota: a exigencia do segundo fator e da conta,
+    # nao de uma funcionalidade. Uma rota nova nasce protegida sem ninguem
+    # lembrar.
+    try:
+        exigir_segundo_fator(usuario)
+    except HTTPException as e:
+        return JSONResponse({"detail": e.detail}, status_code=e.status_code,
+                            headers=e.headers or None)
     request.state.usuario = usuario
     return await call_next(request)
 
@@ -883,8 +1047,11 @@ async def api_eu(request: Request):
     return {
         "id": usuario.id,
         "email": usuario.email,
+        "nome": usuario.nome,
+        "nome_exibido": usuario.nome_exibido,
         "role": usuario.role,
         "eh_admin": usuario.eh_admin,
+        "mfa_ativo": usuario.mfa_ativo,
     }
 
 
@@ -907,10 +1074,18 @@ async def webhook_telegram(canal_id: int, secret: str, request: Request):
         return JSONResponse({"ok": False}, status_code=404)
 
     texto, chat_id = telegram.extrair_mensagem(payload)
-    if texto and chat_id:
+    # Item 15: a legenda de um anexo é o texto da mensagem. Sem isto, "isso aqui
+    # quebrou" numa foto seria entregue como foto muda, e o agente responderia
+    # sobre a imagem em vez de sobre o problema.
+    anexo = telegram.extrair_anexo(payload)
+    if anexo and not texto:
+        msg = payload.get("message") or {}
+        texto = msg.get("caption") or ""
+    if chat_id and (texto or anexo):
         await repo.salvar_na_caixa(
-            canal_id, chat_id, texto,
-            origem=f"tg:{payload.get('update_id')}", payload=payload,
+            canal_id, chat_id, texto or midia.descrever(anexo),
+            origem=f"tg:{payload.get('update_id')}",
+            payload={**payload, "anexo": anexo} if anexo else payload,
         )
     return JSONResponse({"ok": True})
 
@@ -955,10 +1130,15 @@ async def webhook_evolution(canal_id: int, secret: str, request: Request):
         return JSONResponse({"ok": True})
 
     texto, numero, dados = evolution.extrair_mensagem(payload)
-    if texto and numero:
+    anexo = evolution.extrair_anexo(dados or {})
+    if not texto and anexo:
+        texto = ((anexo or {}).get("legenda") or "")
+    if numero and (texto or anexo):
         key_id = (dados.get("key") or {}).get("id") or ""
         await repo.salvar_na_caixa(
-            canal_id, numero, texto, origem=f"wa:{key_id}", payload=dados,
+            canal_id, numero, texto or midia.descrever(anexo),
+            origem=f"wa:{key_id}",
+            payload={**(dados or {}), "anexo": anexo} if anexo else dados,
         )
     return JSONResponse({"ok": True})
 
@@ -981,13 +1161,21 @@ async def webhook_generico(canal_id: int, secret: str, request: Request):
     # receber resposta vazia em silencio, que e a perda que a fila existe pra evitar
     texto = str(payload.get("text") or payload.get("texto") or "").strip()
     usuario = str(payload.get("user") or payload.get("remetente") or "anonimo").strip() or "anonimo"
-    if not texto:
-        return JSONResponse({"reply": ""})
+    # Item 15: quem integra pode mandar `anexos` (foto, audio, video, arquivo).
+    # A forma normalizada e a de `app/midia.py`; `_de_item_solto` aceita tambem
+    # `mime_type`/`filename`/`url`/`base64` de third-party.
+    anexos = midia.normalizar(
+        payload.get("anexos") or payload.get("attachments") or payload.get("anexo")
+    )
+    if not texto and not anexos:
+        return JSONResponse({"reply": "", "status": "vazio"})
 
     # origem unica por requisicao: o indice unico (canal_id, origem) descartaria
     # a segunda mensagem se duas requisições viessem com a origem vazia.
     msg_id = await repo.salvar_na_caixa(
-        canal_id, usuario, texto, origem=f"web:{uuid.uuid4().hex}", payload=payload,
+        canal_id, usuario, texto or midia.descrever(anexos),
+        origem=f"web:{uuid.uuid4().hex}",
+        payload={**payload, "anexos": [m.para_dict() for m in anexos]} if anexos else payload,
     )
     if msg_id is None:
         return JSONResponse({"reply": "", "status": "duplicado"}, status_code=200)
@@ -1028,6 +1216,9 @@ async def post_agente(request: Request):
         raise HTTPException(400, "Informe o nome do agente.")
     if not prompt:
         raise HTTPException(400, "Informe o system prompt.")
+    # Cota do item 9 (quantos agentes o plano permite), antes de gravar: e
+    # melhor recusar aqui do que criar e ter que apagar.
+    await exigir_cota_agentes(usuario.id)
     # O dono é SEMPRE a conta logada. Ignorar um "dono_id" que venha no corpo é
     # proposital: se o campo fosse respeitado, bastaria trocar o uuid no corpo
     # para criar agente na conta de outro.
@@ -1122,9 +1313,18 @@ async def post_canal(agente_id: int, request: Request):
         raise HTTPException(400, "Informe um nome para o canal.")
     _exigir_tipo_permitido(usuario, tipo)
 
+    # Cota do item 9 (canais POR AGENTE), quem decide é o plano da conta. O
+    # limite fixo MAX_CANAIS_POR_AGENTE virou só o teto do admin: um cliente
+    # no plano Início (2 canais) não podia criar o terceiro, e um cliente no
+    # Negócio (6 canais) era travado no quinto.
     existentes = await repo.listar_canais(agente_id)
-    if len(existentes) >= MAX_CANAIS_POR_AGENTE:
-        raise HTTPException(400, f"Cada agente aceita no máximo {MAX_CANAIS_POR_AGENTE} canais.")
+    if usuario.eh_admin:
+        if len(existentes) >= MAX_CANAIS_POR_AGENTE:
+            raise HTTPException(
+                400, f"Cada agente aceita no máximo {MAX_CANAIS_POR_AGENTE} canais."
+            )
+    else:
+        await exigir_cota_canais(usuario.id, len(existentes))
 
     config = _validar_config_canal(tipo, config, agent_id=agente_id)
     await _exigir_identificador_unico(tipo, config)

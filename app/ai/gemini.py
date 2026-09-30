@@ -48,6 +48,33 @@ Perfil atual:
 {mensagens}"""
 
 
+# Item 15: o que o agente recebe além de texto. Declarado no PROMPT DE SISTEMA
+# (e não no texto que o cliente digita) para que valha também para os agentes
+# internos dos itens 7, 12 e 13, que não têm prompt editável.
+BLOCO_MULTIMODAL = """
+## Anexos que você recebe
+Além de texto, esta conversa pode vir com anexos. Quando vierem, eles chegaram
+junto com a mensagem, e o que você vê deles é o conteúdo de verdade:
+
+- `[foto]` — imagem. Você vê a imagem; descreva o que é relevante.
+- `[audio]` — áudio. Você ouve; transcreva o que for fala e resuma o resto.
+- `[video]` — vídeo. Você vê os quadros e ouve o áudio; descreva a cena.
+- `[arquivo]` — documento (PDF, texto, planilha, código). Você lê o conteúdo.
+
+Regras sobre anexos:
+1. Um anexo marcado como "(não foi lido: ...)" NÃO chegou até você. Diga isso e
+   peça para reenviar. Nunca descreva, adivinhe ou invente o conteúdo de um
+   anexo que você não recebeu.
+2. O texto entre colchetes é a descrição do arquivo (nome, tipo, tamanho), não o
+   conteúdo dele. Se o anexo foi lido, o conteúdo está aí para você ver.
+3. Anexos não voltam nas mensagens seguintes: se pedirem "e o que tinha na
+   foto?", você tem o registro de que houve uma foto, não a foto. Peça de novo.
+4. Responder a uma pergunta sobre um anexo é a prioridade daquela mensagem, mas
+   o texto do usuário manda: se ele perguntou outra coisa, responda o que foi
+   perguntado e só então ofereça o que viu no anexo.
+"""
+
+
 def _montar_historico(historico: list[dict]) -> list[types.Content]:
     return [
         types.Content(
@@ -60,6 +87,10 @@ def _montar_historico(historico: list[dict]) -> list[types.Content]:
 
 def _contexto_prompt(system_prompt: str, memoria: dict) -> str:
     corpo = system_prompt or ""
+    # O item 15: a declaracao vai para TODO agente, e antes da memoria para que
+    # a memoria (que e sobre a pessoa, nao sobre o canal) nao empurre a regra de
+    # anexo para o fim do prompt, que e onde o modelo le com menos atencao.
+    corpo = corpo + BLOCO_MULTIMODAL
     if memoria:
         bloco = "\n\nMemória do usuário (dados que você registrou antes; use como informações confirmadas, mas corrija se o usuário contradizer):\n"
         bloco += json.dumps(memoria, ensure_ascii=False, indent=2)
@@ -89,20 +120,46 @@ def _gerar(conteudo: str | list[types.Content], instrucao: str | None = None) ->
     raise erro if erro else RuntimeError("Nenhum modelo Gemini disponivel.")
 
 
+def _partes_da_mensagem(mensagem: str, anexos: list[bytes | tuple[str, bytes]]) -> list[types.Part]:
+    """A mensagem nova vira N `Part`: o texto e um por anexo.
+
+    Texto PRIMEIRO de propósito. O modelo anota o pedido e só depois olha a
+    imagem; invertendo, ele descreve a foto e esquece a pergunta. E texto sempre
+    presente, mesmo com anexos só: uma mensagem sem nenhuma `Part` de texto não
+    é uma conversa, é um arquivo.
+    """
+    partes: list[types.Part] = [types.Part(text=mensagem or "")]
+    for anexo in anexos or []:
+        mime, dados = anexo if isinstance(anexo, tuple) else ("", anexo)
+        if not dados:
+            continue
+        partes.append(types.Part(
+            inline_data=types.Blob(mime_type=mime or "application/octet-stream",
+                                   data=dados),
+        ))
+    return partes
+
+
 async def responder(
     system_prompt: str,
     historico: list[dict],
     mensagem: str,
     memoria: dict | None = None,
+    anexos: list[bytes | tuple[str, bytes]] | None = None,
 ) -> str:
-    """Envia para o Gemini: system prompt + memória + histórico + nova mensagem.
+    """Envia para o Gemini: system prompt + memória + histórico + mensagem (+ anexos).
 
     A biblioteca google-genai é síncrona e pode demorar 45s. Rodar isso direto no
     event loop congelaria o servidor inteiro (webhooks, worker da fila, keepalive)
     durante cada chamada, então tudo aqui vai para uma thread.
+
+    `anexos` é lista de bytes, ou de `(mime, bytes)` — o item 15. O teto de
+    tamanho é conferido antes, em `app/pipeline.py`, então aqui chega só o que
+    cabe, e `_gerar` é chamado uma única vez com tudo.
     """
     instrucao = _contexto_prompt(system_prompt, memoria or {}) or None
-    conteudo = [*_montar_historico(historico), types.Part(text=mensagem)]
+    novas = types.Content(role="user", parts=_partes_da_mensagem(mensagem, anexos))
+    conteudo = [*_montar_historico(historico), novas]
     return await asyncio.to_thread(_gerar, conteudo, instrucao)
 
 

@@ -217,3 +217,63 @@ async def verificar(cfg: dict[str, Any], tipo_canal: str) -> str:
     if tipo_canal == "whatsapp_oficial":
         return await verificar_whatsapp(cfg)
     return await verificar_instagram(cfg)
+
+
+# --------------------------------------------------------------------------
+# Anexos (item 15)
+# --------------------------------------------------------------------------
+
+#: `message.<chave>` do webhook da Meta -> tipo do item 15.
+_CAMPO_META = (
+    ("image", "foto"),
+    ("audio", "audio"),
+    ("video", "video"),
+    ("document", "arquivo"),
+    ("sticker", "foto"),
+)
+
+
+def extrair_anexo(mensagem: dict) -> dict | None:
+    """Referência do anexo de uma mensagem da Meta, ou None se é só texto.
+
+    O webhook traz `id` e `mime_type`, e a URL de download SÓ existe depois de
+    um GET no id (a Graph responde `{"url": ...}`). Guardar a URL no
+    `payload_json` seria inútil: ela expira em 5 minutos, e a fila pode levar
+    mais tempo que isso para ser processada. O que fica guardado é o id.
+    """
+    for chave, tipo in _CAMPO_META:
+        corpo = (mensagem or {}).get(chave)
+        if isinstance(corpo, dict) and corpo.get("id"):
+            return {
+                "tipo": tipo,
+                "mime": corpo.get("mime_type") or "",
+                "nome": (corpo.get("filename") or corpo.get("id")),
+                "fonte": {"ref": str(corpo["id"])},
+            }
+    return None
+
+
+async def baixar_anexo(cfg: dict[str, Any], tipo_canal: str, midia_id: str) -> tuple[str, bytes]:
+    """Baixa um anexo da Meta. Devolve (mime, bytes).
+
+    Duas chamadas, e a segunda é a que importa: a URL que a Graph devolve é de
+    uso único e de 5 minutos, e ela SÓ aceita o token como query param — não
+    como header. Mandar no header devolve 403 sem mensagem útil, então o
+    `headers` fica de fora aqui de propósito.
+    """
+    token = token_acesso(cfg)
+    if not token:
+        raise MetaError("canal oficial sem access_token")
+    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as http:
+        passo1 = await http.get(f"{GRAPH_BASE}/{midia_id}", params={"access_token": token})
+        if passo1.status_code >= 400:
+            raise _extrair_erro(passo1)
+        dados = passo1.json()
+        url = dados.get("url") or ""
+        mime = str(dados.get("mime_type") or "application/octet-stream")
+        if not url:
+            raise MetaError("Graph nao devolveu url de download para o anexo")
+        passo2 = await http.get(url, params={"access_token": token})
+    if passo2.status_code >= 400:
+        raise _extrair_erro(passo2)
+    return mime.split(";")[0], passo2.content

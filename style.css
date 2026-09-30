@@ -1,14 +1,70 @@
-:root {
-    --bg: #0f1117; --panel: #171a23; --panel-2: #14161f; --border: #262b3a;
-    --text: #e6e8ee; --muted: #9aa3b5; --accent: #4f7cff; --accent-2: #38b26e;
-    --danger: #ef5350; --warn: #f0a53b;
+/* ===========================================================================
+   TEMA
+
+   Claro por padrão: branco e preto, sem imagem nenhuma. O modo escuro é o
+   NEGATIVO da página — a mesma tela com cada canal trocado por 255 - canal,
+   para quem tem o sistema em dark não veja um site claro e ilegível.
+
+   A regra é mecânica, e por isso dá para conferir: para todo token neutro
+   abaixo, a cor do bloco escuro é exatamente o complemento da do bloco
+   claro. Há duas exceções, marcadas como tal e as únicas do arquivo:
+     1. cor de semântica (--danger, --accent-2, --warn e os *-ok/perigo/aviso)
+        — o negativo literal de um vermelho é um ciano, e um "erro" ciano não
+        comunica nada. Elas trocam de tom para manter contraste, não de matiz;
+     2. o toast, que é a superfície de alerta: fica claro no escuro, com texto
+        preto, para continuar sendo a única coisa que "grita" na tela.
+
+   "Muda com a configuração do navegador": quem ajusta a cor no sistema
+   operacional recebe o tema escuro sem nenhum JavaScript. Não existe
+   alternador manual, de propósito — o site segue o sistema.
+   =========================================================================== */
+  :root {
+    color-scheme: light;
+    --bg: #ffffff; --panel: #ffffff; --panel-2: #f7f7f7; --border: #e2e2e2;
+    --text: #0a0a0a; --muted: #6b6b6b;
+    /* accent = preto. O botão primário é preto com texto branco. */
+    --accent: #0a0a0a; --on-accent: #ffffff;
+    --field: #ffffff; --code: #f2f2f2; --btn: #f2f2f2; --btn-hover: #e4e4e4;
+    --badge: #f0f0f0; --border-forte: #bdbdbd;
+    --tint: rgba(10, 10, 10, .05);
+    --sombra: rgba(0, 0, 0, .18);
+    --overlay: rgba(0, 0, 0, .45);
+    /* excecao 1: matiz preservado, so o tom muda */
+    --accent-2: #0f7b3f; --danger: #b3261e; --warn: #9a6200;
+    --tint-ok: rgba(15, 123, 63, .10);
+    --tint-perigo: rgba(179, 38, 30, .10);
+    --tint-aviso: rgba(154, 98, 0, .10);
+    --borda-perigo: rgba(179, 38, 30, .45);
+    /* excecao 2: superficie de alerta */
+    --toast-ok: #1f6f43; --toast-err: #a3272b; --toast-info: #1f1f1f;
+    --toast-txt: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #000000; --panel: #000000; --panel-2: #080808; --border: #1d1d1d;
+      --text: #f5f5f5; --muted: #949494;
+      --accent: #f5f5f5; --on-accent: #000000;
+      --field: #000000; --code: #0d0d0d; --btn: #0d0d0d; --btn-hover: #1b1b1b;
+      --badge: #0f0f0f; --border-forte: #424242;
+      --tint: rgba(245, 245, 245, .05);
+      --sombra: rgba(0, 0, 0, .6);
+      --overlay: rgba(0, 0, 0, .6);
+      --accent-2: #4ade80; --danger: #ff6b6b; --warn: #fbbf24;
+      --tint-ok: rgba(74, 222, 128, .14);
+      --tint-perigo: rgba(255, 107, 107, .14);
+      --tint-aviso: rgba(251, 191, 36, .14);
+      --borda-perigo: rgba(255, 107, 107, .45);
+      --toast-ok: #6ee7a0; --toast-err: #ff9a97; --toast-info: #e5e5e5;
+      --toast-txt: #0a0a0a;
+    }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text);
     display: flex; min-height: 100vh;
   }
-  code { background: #12141c; padding: 1px 5px; border-radius: 5px; font-size: 12px; word-break: break-all; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 5px; font-size: 12px; word-break: break-all; }
   aside {
     width: 300px; padding: 16px; border-right: 1px solid var(--border); background: var(--panel);
     overflow-y: auto; flex-shrink: 0;
@@ -17,29 +73,31 @@
   aside .sub { font-size: 11px; color: var(--muted); margin: 0 0 14px; }
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border);
-    background: #20242f; color: var(--text); padding: 7px 12px; border-radius: 8px; cursor: pointer;
+    background: var(--btn); color: var(--text); padding: 7px 12px; border-radius: 8px; cursor: pointer;
     font-size: 13px; transition: filter .15s, opacity .15s; white-space: nowrap;
   }
-  .btn:hover:not(:disabled) { filter: brightness(1.15); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); }
-  .btn.green { background: var(--accent-2); border-color: var(--accent-2); }
-  .btn.danger { color: var(--danger); border-color: rgba(239,83,80,.5); }
+  .btn:hover:not(:disabled) { background: var(--btn-hover); }
+  /* Botão sólido precisa do texto da COR OPOSTA: o accent é preto no claro e
+     branco no escuro, então o texto tem de inverter junto. */
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn.green { background: var(--accent-2); border-color: var(--accent-2); color: var(--on-accent); }
+  .btn.danger { color: var(--danger); border-color: var(--borda-perigo); }
   .btn.sm { padding: 4px 9px; font-size: 12px; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .agente-item {
     padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
     cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 8px;
   }
-  .agente-item:hover { border-color: #3a4157; }
-  .agente-item.active { border-color: var(--accent); background: rgba(79,124,255,.06); }
+  .agente-item:hover { border-color: var(--border-forte); }
+  .agente-item.active { border-color: var(--accent); background: var(--tint); }
   .agente-item .nome { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badge {
-    font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #22283a; color: var(--muted);
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--badge); color: var(--muted);
     white-space: nowrap;
   }
-  .badge.on { background: rgba(56,178,110,.15); color: var(--accent-2); }
-  .badge.off { background: rgba(239,83,80,.12); color: var(--danger); }
-  .badge.tipo { background: rgba(79,124,255,.15); color: #9db4ff; }
+  .badge.on { background: var(--tint-ok); color: var(--accent-2); }
+  .badge.off { background: var(--tint-perigo); color: var(--danger); }
+  .badge.tipo { background: var(--tint); color: var(--text); }
   main { flex: 1; padding: 20px; max-width: 1000px; min-width: 0; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px;
@@ -47,7 +105,7 @@
   .card h2 { margin: 0 0 12px; font-size: 15px; }
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
   input[type=text], input[type=password], select, textarea {
-    width: 100%; background: #12141c; border: 1px solid var(--border); color: var(--text);
+    width: 100%; background: var(--field); border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 9px 10px; font-size: 13px; font-family: inherit;
   }
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
@@ -56,29 +114,31 @@
   .muted { color: var(--muted); font-size: 12px; }
   .aviso { font-size: 12px; color: var(--muted); }
   .qrcode { text-align: center; padding: 12px; }
+  /* Fundo branco é a única cor fixa do arquivo: o leitor de QR Code precisa da
+     zona morta clara para funcionar, e inverter isso quebraria o pareamento. */
   .qrcode img { width: 220px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
   .warn {
-    background: rgba(240,165,59,.08); border: 1px solid var(--warn); color: var(--warn);
+    background: var(--tint-aviso); border: 1px solid var(--warn); color: var(--warn);
     border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5;
   }
   .aviso-ok {
-    background: rgba(56,178,110,.08); border: 1px solid var(--accent-2); color: var(--accent-2);
+    background: var(--tint-ok); border: 1px solid var(--accent-2); color: var(--accent-2);
     border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5;
   }
   .kanal { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--panel-2); }
   .kanal .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-  pre { background: #12141c; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; margin: 8px 0 0; }
+  pre { background: var(--code); padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; margin: 8px 0 0; }
   .hidden { display: none !important; }
   .qr-status { font-size: 12px; color: var(--muted); }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   #toasts { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
   .toast {
-    padding: 10px 14px; border-radius: 8px; font-size: 13px; color: #fff; max-width: 360px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.35); animation: slidein .2s ease;
+    padding: 10px 14px; border-radius: 8px; font-size: 13px; color: var(--toast-txt); max-width: 360px;
+    box-shadow: 0 6px 20px var(--sombra); animation: slidein .2s ease;
   }
-  .toast.ok { background: #2e7d52; }
-  .toast.err { background: #b23b39; }
-  .toast.info { background: #3a4668; }
+  .toast.ok { background: var(--toast-ok); }
+  .toast.err { background: var(--toast-err); }
+  .toast.info { background: var(--toast-info); }
   @keyframes slidein { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
   .inline-result { font-size: 12px; margin-left: 6px; }
   .inline-result.ok { color: var(--accent-2); }
@@ -102,7 +162,7 @@
   .prob .txt { flex: 1; min-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
   .prob .erro {
     display: none; width: 100%; margin-top: 6px; padding: 8px 10px;
-    background: #12141c; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
     color: var(--muted); font-size: 11px; line-height: 1.5;
     white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
   }
@@ -116,3 +176,118 @@
     display: flex; align-items: center; justify-content: center; padding: 20px;
   }
   #gate .box { width: 100%; max-width: 360px; }
+
+  /* ---- chats internos (home, suporte, gerador) + "digitando" (item 8) ---- */
+  .chat-js {
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .chat-lista {
+    flex: 1; overflow-y: auto; min-height: 200px; max-height: 340px; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .bolha {
+    max-width: 84%; padding: 9px 12px; border-radius: 12px; font-size: 13px;
+    line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  }
+  .bolha.voce { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+  .bolha.ia { align-self: flex-start; background: var(--panel-2); color: var(--text);
+              border: 1px solid var(--border); }
+  .bolha.erro { color: var(--danger); }
+  .bolha.digitando { display: inline-flex; gap: 4px; align-items: center; min-width: 46px; }
+  .bolha.digitando span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+    animation: pontos 1.2s infinite ease-in-out;
+  }
+  .bolha.digitando span:nth-child(2) { animation-delay: .15s; }
+  .bolha.digitando span:nth-child(3) { animation-delay: .3s; }
+  @keyframes pontos { 0%, 60%, 100% { opacity: .2; } 30% { opacity: 1; } }
+  .chat-entrada { display: flex; gap: 8px; align-items: flex-end; padding: 10px;
+                  border-top: 1px solid var(--border); }
+  .chat-campo {
+    flex: 1; min-height: 38px; max-height: 120px; resize: none;
+    background: var(--field); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 9px 10px; font-size: 13px; font-family: inherit;
+  }
+  .chat-campo:focus { outline: none; border-color: var(--accent); }
+  .chat-anexar, .chat-enviar {
+    flex: none; background: var(--btn); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 12px; font-size: 13px; cursor: pointer;
+  }
+  .chat-anexar:hover, .chat-enviar:hover { background: var(--btn-hover); }
+  .chat-anexar:disabled, .chat-enviar:disabled, .chat-campo:disabled { opacity: .5; cursor: default; }
+  .chat-anexos { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+  .chat-anexos:empty { display: none; }
+  .chat-anexo {
+    font-size: 11px; background: var(--code); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 9px; color: var(--text);
+    display: inline-flex; gap: 6px; align-items: center; max-width: 230px;
+  }
+  .chat-anexo span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-anexo-x { border: none; background: none; color: var(--muted); cursor: pointer;
+                  font-size: 13px; line-height: 1; padding: 0 2px; }
+  .chat-botao {
+    align-self: flex-start; margin-top: 2px; font-size: 12px; padding: 8px 13px;
+    background: var(--accent); color: var(--on-accent); border: none; border-radius: 8px;
+    cursor: pointer; text-decoration: none;
+  }
+  .chat-botao:hover { opacity: .9; }
+  .chat-botao.ghost { background: var(--btn); color: var(--text); border: 1px solid var(--border); }
+
+  /* Popup lateral do gerador de prompt (item 12): ao lado do campo de instrução,
+     não acima — o texto já escrito fica visível enquanto o gerador pergunta. */
+  .agente-form-wrap { position: relative; }
+  .gerador-popup {
+    position: absolute; top: 0; right: calc(100% + 10px); z-index: 30;
+    width: min(78vw, 360px); max-height: min(86vh, 640px);
+    display: flex; flex-direction: column; box-shadow: 0 10px 30px var(--sombra);
+  }
+  .gerador-popup .chat-lista { max-height: none; }
+  .gerador-popup .cab, .suporte-modal .cab {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 13px; background: var(--panel);
+  }
+  .gerador-popup .fechar, .suporte-modal .fechar {
+    border: none; background: none; color: var(--muted); cursor: pointer;
+    font-size: 18px; line-height: 1; padding: 0 4px;
+  }
+  .gerador-popup .copiar { align-self: center; margin: 6px 10px 10px; }
+  @media (max-width: 1100px) {
+    .gerador-popup { position: fixed; right: auto; left: 50%; top: 50%;
+                     transform: translate(-50%, -50%); width: min(92vw, 380px); }
+  }
+
+  /* Botão flutuante do suporte (item 13). O modal fica sobre o botão, e o botão
+     some (vira "×" no canto do modal) — a tela nunca ganha dois botões. */
+  .suporte-flut {
+    position: fixed; right: 18px; bottom: 18px; z-index: 40; width: 54px; height: 54px;
+    border-radius: 50%; border: none; cursor: pointer; background: var(--accent);
+    color: var(--on-accent); font-size: 22px; display: grid; place-items: center;
+    box-shadow: 0 6px 18px var(--sombra);
+  }
+  .suporte-flut:hover { opacity: .92; }
+  .suporte-modal {
+    position: fixed; right: 18px; bottom: 84px; z-index: 41; display: flex;
+    flex-direction: column; width: min(92vw, 390px); height: min(78vh, 540px);
+    box-shadow: 0 12px 34px var(--sombra); overflow: hidden;
+  }
+  .suporte-modal .chat-js { flex: 1; border: none; border-radius: 0; min-height: 0; }
+  .suporte-modal .chat-lista { flex: 1; min-height: 0; max-height: none; }
+
+  /* Checkout PIX (cobrança real): overlay escuro + cartão centrado. O QR tem
+     fundo branco de propósito — a zona morta clara que os bancos esperam para
+     ler o PIX (a mesma exceção do QR do 2FA), e o contraste não pode vir da
+     página, que pode estar em dark. */
+  .pix-overlay {
+    position: fixed; inset: 0; z-index: 55; background: var(--overlay);
+  }
+  .pix-card {
+    position: fixed; z-index: 56; left: 50%; top: 50%;
+    transform: translate(-50%, -50%); width: min(92vw, 430px);
+    max-height: 92vh; overflow: auto;
+    box-shadow: 0 14px 40px var(--sombra);
+  }
+  .pix-qrcode-area { text-align: center; margin: 14px 0; display: flex; justify-content: center; }
+  .pix-qrcode-area img { width: 224px; height: 224px; object-fit: contain; padding: 8px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+  .pix-qrcode-area p { max-width: 320px; }

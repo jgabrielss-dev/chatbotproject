@@ -14,7 +14,7 @@
   .home .sub { margin: 0 0 28px; }
   .abas { display: flex; gap: 6px; margin-bottom: 18px; }
   .abas button { flex: 1; }
-  .abas button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .abas button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
   input { width: 100%; }
   .acoes { margin-top: 20px; }
@@ -28,6 +28,37 @@
   .recursos h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .recursos ul { padding-left: 18px; margin: 8px 0 0; }
   .recursos li { margin: 5px 0; font-size: 14px; }
+
+  /* ---- medidor de força da senha (item 5) ----
+     Quatro segmentos, não uma porcentagem: o usuário precisa saber O QUE
+     falta, e "senha 4/10" não diz isso. As dicas abaixo do medidor são a parte
+     que faz o trabalho -- o número sozinho só irrita. */
+  #medidor { margin-top: 8px; }
+  #medidor .trilha { display: flex; gap: 4px; }
+  #medidor .trilha i { height: 5px; flex: 1; background: var(--tint); border-radius: 3px; }
+  #medidor[data-nivel="1"] .trilha i:nth-child(-n+1) { background: var(--danger); }
+  #medidor[data-nivel="2"] .trilha i:nth-child(-n+2) { background: var(--warn); }
+  #medidor[data-nivel="3"] .trilha i:nth-child(-n+3) { background: var(--accent-2); }
+  #medidor[data-nivel="4"] .trilha i { background: var(--accent-2); }
+  #medidor .rotulo { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  #medidor ul { margin: 4px 0 0; padding-left: 16px; }
+  #medidor li { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  #medidor li.feito { color: var(--accent-2); }
+
+  .check { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0 0; color: var(--text); font-size: 13px; }
+  .check input { width: auto; margin-top: 2px; }
+  .check .sec { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  /* ---- inscrição do 2FA ---- */
+  .painel2fa { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .painel2fa h3 { font-size: 14px; margin: 0 0 6px; }
+  .painel2fa p { font-size: 13px; color: var(--muted); margin: 6px 0; }
+  .painel2fa ol { margin: 8px 0; padding-left: 20px; font-size: 13px; color: var(--muted); }
+  .painel2fa ol li { margin: 4px 0; }
+  .painel2fa .secreto { word-break: break-all; }
+  .painel2fa code { background: var(--code); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  .painel2fa ul.recuperacao { columns: 2; list-style: none; padding: 0; font-family: ui-monospace, monospace; }
+  .painel2fa ul.recuperacao li { margin: 2px 0; font-size: 13px; }
 </style>
 </head>
 <body class="home">
@@ -43,12 +74,40 @@
     </div>
 
     <form id="form" autocomplete="on">
+      <div id="blocoNome" class="hidden">
+        <label for="nome">Nome</label>
+        <input type="text" id="nome" autocomplete="name" placeholder="Como podemos te chamar" maxlength="120">
+      </div>
+
       <label for="email">E-mail</label>
       <input type="email" id="email" required autocomplete="email" placeholder="voce@empresa.com">
 
       <div id="blocoSenha">
         <label for="senha">Senha</label>
         <input type="password" id="senha" required autocomplete="current-password" placeholder="mínimo de 6 caracteres">
+
+        <div id="medidor" class="hidden" data-nivel="0">
+          <div class="trilha"><i></i><i></i><i></i><i></i></div>
+          <p class="rotulo" id="forcaRotulo">Senha fraca</p>
+          <ul id="forcaDicas"></ul>
+        </div>
+
+        <label class="check hidden" id="blocoOpt2fa">
+          <input type="checkbox" id="quero2fa">
+          <span>
+            Ativar verificação em duas etapas
+            <span class="sec">Pedimos um código do seu app autenticador a cada entrada.
+              Perdeu o celular? Guarde os códigos de recuperação que mostramos na
+              sequência.</span>
+          </span>
+        </label>
+      </div>
+
+      <div id="blocoCodigo" class="hidden">
+        <label for="codigo">Código do aplicativo autenticador</label>
+        <input type="text" id="codigo" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" placeholder="000000" class="mono">
+        <p class="dica" id="dicaCodigo">Ordem de 6 dígitos, do próprio app.</p>
       </div>
 
       <div class="erro" id="erro"></div>
@@ -58,6 +117,28 @@
         <button class="btn primary" id="btnEnviar" type="submit">Entrar</button>
       </div>
     </form>
+
+    <div class="painel2fa hidden" id="painel2fa">
+      <h3>Verificação em duas etapas</h3>
+      <ol>
+        <li>No seu celular, abra o app autenticador (Google Authenticator, Authy, 1Password…).</li>
+        <li>Adicione uma conta e escaneie o código abaixo.</li>
+        <li>Digite o código de 6 dígitos que aparecer no app.</li>
+      </ol>
+      <div class="qrcode"><img id="qr2fa" alt="QR code do aplicativo autenticador"></div>
+      <p>Não dá para escanear? Digite esta chave no app:
+        <code class="secreto" id="segredo2fa"></code></p>
+      <label for="codigoAtivar">Código do aplicativo</label>
+      <input type="text" id="codigoAtivar" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" placeholder="000000">
+      <div class="acoes"><button class="btn primary" id="btnAtivar2fa" type="button">Ativar</button></div>
+      <div class="erro" id="erro2fa"></div>
+      <div class="hidden" id="caixaRecuperacao">
+        <p><strong>Guarde estes códigos de recuperação agora.</strong> Cada um serve
+          uma vez, se você perder o acesso ao app. Não mostramos de novo.</p>
+        <ul class="recuperacao" id="listaRecuperacao"></ul>
+      </div>
+    </div>
 
     <div class="alternar" id="alternar"></div>
   </div>
@@ -76,7 +157,10 @@
 <script>
 (async () => {
   const $ = (id) => document.getElementById(id);
-  let modo = "entrar";   // "entrar" | "criar" | "recuperar"
+  let modo = "entrar";      // "entrar" | "criar"
+  let mfaPendente = null;   // { fatorId } quando o login pede o segundo fator
+  let desafio = null;       // { id } do desafio de código em aberto
+  let fatorNovo = null;     // fator inscrito mas ainda não confirmado
 
   // Já logado? Vai direto para a tela certa, sem passar pelo formulário.
   const eu = await Auth.obterSessao();
@@ -93,16 +177,182 @@
 
   const ROTULO = { entrar: "Entrar", criar: "Criar conta", recuperar: "Enviar link" };
 
+  /* ---------------------------------------------------- medidor de senha */
+
+  // Senhas que passam em "8+ caracteres, maiúscula, dígito, símbolo" e ainda assim
+  // caem em três cliques. A lista é curta de propósito: o medidor é um filtro,
+  // não um dicionário.
+  const COMUNS = ["senha", "senha123", "12345678", "123456789", "password", "qwerty",
+    "admin", "chatbot", "chatbotproject", "mudar123", "abc12345", "11111111"];
+
+  const REGRAS = [
+    { txt: "Pelo menos 8 caracteres", ok: (s) => s.length >= 8 },
+    { txt: "Letras maiúsculas e minúsculas", ok: (s) => /[a-z]/.test(s) && /[A-Z]/.test(s) },
+    { txt: "Pelo menos um número", ok: (s) => /\d/.test(s) },
+    { txt: "Pelo menos um símbolo (!@#$…)", ok: (s) => /[^A-Za-z0-9]/.test(s) },
+    { txt: "Não é uma senha comum", ok: (s) => !COMUNS.includes(s.toLowerCase()) }
+  ];
+
+  const NIVEIS = ["Senha fraca", "Senha fraca", "Senha razoável", "Senha boa", "Senha forte"];
+
+  function medir(senha) {
+    const r = REGRAS.map((x) => ({ txt: x.txt, ok: !!x.ok(senha) }));
+    // A barra conta as quatro primeiras regras (tamanho, mistura, número,
+    // símbolo). "Não é comum" não soma ponto: ela tira, e uma barra que
+    // mentisse para compensar seria pior do que a barra sumir.
+    let pontos = r.slice(0, 4).filter((x) => x.ok).length;
+    if (!r[4].ok && senha) pontos = 0;
+    if (senha.length && senha.length < 8) pontos = Math.min(pontos, 1);
+    return { pontos, regras: r };
+  }
+
+  function pintarMedidor() {
+    // Fora do cadastro o medidor nao tem o que medir: esconder aqui evita o
+    // botao ficar travado por uma senha fraca que sobrou do outro modo.
+    if (modo !== "criar") {
+      $("medidor").classList.add("hidden");
+      $("btnEnviar").disabled = false;
+      $("btnEnviar").title = "";
+      return;
+    }
+    const senha = $("senha").value;
+    const { pontos, regras } = medir(senha);
+    $("medidor").classList.toggle("hidden", !senha);
+    $("medidor").dataset.nivel = senha ? String(pontos) : "0";
+    $("forcaRotulo").textContent = senha ? NIVEIS[pontos] : "Senha fraca";
+    $("forcaDicas").innerHTML = regras
+      .map((r) => `<li class="${r.ok ? "feito" : ""}">${r.ok ? "✓" : "○"} ${Auth.esc(r.txt)}</li>`)
+      .join("");
+    // O botao so trava com senha visível e insuficiente: uma senha vazia não
+    // pode impedir o clique, senão o formulário parece quebrado antes de
+    // qualquer digitação.
+    $("btnEnviar").disabled = !!senha && senha.length > 0 && pontos < 2;
+    $("btnEnviar").title = pontos < 2 && senha
+      ? "Use pelo menos 8 caracteres, com maiúscula, minúscula e número."
+      : "";
+  }
+
+  $("senha").addEventListener("input", pintarMedidor);
+
+  /* --------------------------------------------------------- 2FA de login */
+
+  function mostrarCodigo(fatorId) {
+    mfaPendente = { fatorId };
+    $("blocoCodigo").classList.remove("hidden");
+    $("blocoNome").classList.add("hidden");
+    $("blocoSenha").classList.add("hidden");
+    $("medidor").classList.add("hidden");
+    $("btnEnviar").textContent = "Confirmar código";
+    $("alternar").innerHTML = '<button type="button" data-modo="entrar">Voltar para o login</button>';
+    for (const b of $("alternar").querySelectorAll("button")) b.onclick = () => trocar("entrar");
+    $("codigo").focus();
+    Auth.desafiarFator(localStorage.getItem("chatbotproject.usuario"), fatorId)
+      .then((d) => { desafio = d; })
+      .catch((e) => { $("erro").textContent = e.message; });
+  }
+
+  async function confirmarCodigoDeEntrada() {
+    if (!mfaPendente || !desafio) {
+      $("erro").textContent = "Espere o servidor pedir o código antes de confirmar.";
+      return;
+    }
+    const token = localStorage.getItem("chatbotproject.usuario");
+    const r = await Auth.confirmarFator(token, mfaPendente.fatorId, desafio.id, $("codigo").value);
+    $("codigo").value = "";
+    mfaPendente = null;
+    desafio = null;
+    if (r.recovery_codes && r.recovery_codes.length) mostrarRecuperacao(r.recovery_codes);
+    const euAgora = await Auth.obterSessao();
+    if (!euAgora) {
+      $("erro").textContent = "Código aceito, mas a sessão não renovou. Tente entrar de novo.";
+      trocar("entrar");
+      return;
+    }
+    location.replace(destino(euAgora));
+  }
+
+  function mostrarRecuperacao(codigos) {
+    $("caixaRecuperacao").classList.remove("hidden");
+    $("listaRecuperacao").innerHTML = codigos
+      .map((c) => `<li>${Auth.esc(c)}</li>`).join("");
+  }
+
+  /* ------------------------------------------------- inscrição do 2FA nova */
+
+  async function iniciarInscricao() {
+    const token = localStorage.getItem("chatbotproject.usuario");
+    if (!token) return;
+    $("painel2fa").classList.remove("hidden");
+    $("erro2fa").textContent = "Preparando o QR code…";
+    try {
+      const f = await Auth.inscreverFator(token, "Chatbot Project");
+      fatorNovo = f;
+      $("erro2fa").textContent = "";
+      $("qr2fa").src = (f.totp && f.totp.qr_code) || "";
+      $("qr2fa").style.display = $("qr2fa").src ? "" : "none";
+      $("segredo2fa").textContent = (f.totp && f.totp.secret) || "";
+      $("codigoAtivar").focus();
+    } catch (e) {
+      fatorNovo = null;
+      $("painel2fa").classList.add("hidden");
+      $("erro").textContent = e.message;
+    }
+  }
+
+  $("btnAtivar2fa").onclick = async () => {
+    if (!fatorNovo) return;
+    $("btnAtivar2fa").disabled = true;
+    $("erro2fa").textContent = "…";
+    try {
+      const token = localStorage.getItem("chatbotproject.usuario");
+      const r = await Auth.confirmarFator(token, fatorNovo.id, null, $("codigoAtivar").value);
+      // A partir daqui o token no navegador já é aal2, que é a prova de que a
+      // pessoa tem o app. É com ele que a nossa API aceita marcar mfa_ativo.
+      const resp = await fetch(Auth.API_BASE + "/api/painel/mfa", {
+        method: "PUT",
+        headers: { ...Auth.cabecalhoAuth(), "Content-Type": "application/json" },
+        body: JSON.stringify({ ativo: true })
+      });
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(dados.detail && dados.detail.mensagem
+        ? dados.detail.mensagem : "O código foi aceito, mas não foi possível ativar aqui.");
+      $("codigoAtivar").value = "";
+      $("erro2fa").textContent = "";
+      if (r.recovery_codes && r.recovery_codes.length) {
+        mostrarRecuperacao(r.recovery_codes);
+      } else {
+        $("erro2fa").textContent = "Verificação em duas etapas ativada.";
+      }
+    } catch (e) {
+      $("erro2fa").textContent = e.message;
+    } finally {
+      $("btnAtivar2fa").disabled = false;
+    }
+  };
+
+  /* ------------------------------------------------------------- navegação */
+
   function trocar(modoNovo) {
     modo = modoNovo;
+    mfaPendente = null;
+    desafio = null;
     $("erro").textContent = "";
     $("erro").style.color = "var(--danger)";
+    $("erro2fa").textContent = "";
+    $("painel2fa").classList.add("hidden");
+    $("caixaRecuperacao").classList.add("hidden");
     $("abaEntrar").classList.toggle("on", modo === "entrar");
     $("abaCriar").classList.toggle("on", modo === "criar");
 
-    // Recuperar senha nao tem senha: o campo precisa sair de cena e perder o
-    // "required". Sem isso o navegador bloqueia o envio antes do JS rodar, e o
-    // botao "Esqueci minha senha" parece quebrado.
+    const criando = modo === "criar";
+    $("blocoNome").classList.toggle("hidden", !criando);
+    $("blocoOpt2fa").classList.toggle("hidden", !criando);
+    $("blocoCodigo").classList.add("hidden");
+    $("codigo").value = "";
+
+    // Recuperar senha (item 6) não tem senha: o campo precisa sair de cena e
+    // perder o "required". Sem isso o navegador bloqueia o envio antes do JS
+    // rodar, e o botão "Esqueci minha senha" parece quebrado.
     const soEmail = modo === "recuperar";
     $("blocoSenha").classList.toggle("hidden", soEmail);
     $("senha").required = !soEmail;
@@ -110,12 +360,14 @@
 
     $("btnEnviar").textContent = ROTULO[modo];
     $("btnEnviar").disabled = false;
-    $("senha").autocomplete = modo === "criar" ? "new-password" : "current-password";
+    $("btnEnviar").title = "";
+    $("senha").autocomplete = criando ? "new-password" : "current-password";
     $("dica").textContent = soEmail
       ? "Enviamos um link de redefinição para o seu e-mail."
       : "";
+    pintarMedidor();
 
-    $("alternar").innerHTML = modo === "criar"
+    $("alternar").innerHTML = criando
       ? 'Já tem conta? <button type="button" data-modo="entrar">Entrar</button>'
       : '<button type="button" data-modo="recuperar">Esqueci minha senha</button>';
     for (const b of $("alternar").querySelectorAll("button")) {
@@ -127,9 +379,9 @@
   $("abaCriar").onclick = () => trocar("criar");
   trocar("entrar");
 
-  // Auth.destino() sabe a diferenca entre servir no Render (/admin) e no
-  // GitHub Pages (/admin.html). Aqui so cuidamos do ?redir, que a pagina de
-  // destino gravou antes de mandar o usuario para cá.
+  // Auth.destino() sabe a diferença entre servir no Render (/admin) e no
+  // GitHub Pages (/admin.html). Aqui só cuidamos do ?redir, que a página de
+  // destino gravou antes de mandar o usuário para cá.
   function destino(eu) {
     let alvo = null;
     try {
@@ -143,10 +395,28 @@
   $("form").onsubmit = async (ev) => {
     ev.preventDefault();
     $("erro").textContent = "";
+    $("erro").style.color = "var(--danger)";
+
+    // Passo do segundo fator: o mesmo botao confirma o codigo em vez de tentar
+    // logar de novo (que pediria a senha, e nao o codigo, e voltaria ao inicio).
+    if (mfaPendente) {
+      $("btnEnviar").disabled = true;
+      $("btnEnviar").textContent = "Conferindo…";
+      try {
+        await confirmarCodigoDeEntrada();
+      } catch (e) {
+        $("erro").textContent = e.message;
+        $("btnEnviar").disabled = false;
+        $("btnEnviar").textContent = "Confirmar código";
+      }
+      return;
+    }
+
+    const email = $("email").value.trim();
+    const nome = $("nome").value.trim();
+    const senha = $("senha").value;
     $("btnEnviar").disabled = true;
     $("btnEnviar").textContent = "…";
-    const email = $("email").value.trim();
-    const senha = $("senha").value;
     try {
       if (modo === "recuperar") {
         try {
@@ -155,7 +425,7 @@
           $("erro").textContent = "Se houver uma conta com esse e-mail, o link de recuperação foi enviado.";
         } catch (e) {
           // 429 do GoTrue = cota de e-mail estourada (SMTP sem cota real). Sem
-          // dizer isso, o usuario acha que o e-mail foi enviado e fica
+          // dizer isso, o usuário acha que o e-mail foi enviado e fica
           // esperando por algo que nunca sai.
           const semSmtp = /rate limit|429/i.test(e.message || "");
           $("erro").style.color = semSmtp ? "var(--danger)" : "var(--danger)";
@@ -165,31 +435,44 @@
         }
         return;
       }
+
       if (modo === "criar") {
-        if (senha.length < 6) { $("erro").textContent = "A senha precisa de ao menos 6 caracteres."; return; }
-        const r = await Auth.cadastrar(email, senha);
+        const { pontos } = medir(senha);
+        if (pontos < 2) {
+          $("erro").textContent = "A senha é curta demais. Use 8 ou mais caracteres, "
+            + "com maiúscula, minúscula e número.";
+          return;
+        }
+        const r = await Auth.cadastrar(email, senha, nome);
         if (!r.entrou) {
-          // A conta foi criada mas o e-mail de confirmacao nao chegou. Dizer
-          // isso e melhor do que trocar de aba e deixar o usuario tentando
-          // entrar com uma conta que o servidor ainda marca como nao
+          // A conta foi criada mas o e-mail de confirmação não chegou. Dizer
+          // isso é melhor do que trocar de aba e deixar o usuário tentando
+          // entrar com uma conta que o servidor ainda marca como não
           // confirmada.
           $("erro").style.color = "var(--muted)";
-          $("erro").textContent = r.mensagem;
+          $("erro").textContent = r.mensagem + ($("quero2fa").checked
+            ? " Depois de confirmar o e-mail, ative o segundo fator na aba Conta."
+            : "");
           trocar("entrar");
           $("erro").textContent = r.mensagem;
           return;
         }
         const eu = await Auth.obterSessao();
+        if ($("quero2fa").checked) {
+          await iniciarInscricao();
+          return;
+        }
         location.replace(destino(eu));
         return;
       }
+
       let eu;
       try {
         eu = await Auth.entrar(email, senha);
       } catch (e) {
         // O GoTrue diz "Email not confirmed" quando a conta existe mas o
-        // e-mail nunca chegou. Sem tratar, o usuario le "E-mail ou senha
-        // invalidos" e pensa que digitou a senha errada.
+        // e-mail nunca chegou. Sem tratar, o usuário lê "E-mail ou senha
+        // inválidos" e pensa que digitou a senha errada.
         if (/not confirmed/i.test(e.message || "")) {
           $("erro").textContent =
             "Esta conta ainda não foi confirmada. O e-mail de confirmação não chegou — refaça o cadastro ou peça um novo link.";
@@ -198,15 +481,28 @@
         }
         return;
       }
+      // A conta tem 2FA: o token que guardamos é de nível 1 e a nossa API
+      // recusa tudo com ele. O formulário vira o campo do código.
+      if (eu && eu.mfa) {
+        mostrarCodigo(eu.fatorId);
+        return;
+      }
       location.replace(destino(eu));
     } catch (e) {
       $("erro").style.color = "var(--danger)";
       $("erro").textContent = e.message || "Não foi possível continuar.";
     } finally {
+      // Só restaura o rótulo se a tela não mudou de passo: ao entrar no 2FA o
+      // botão precisa continuar dizendo "Confirmar código".
       $("btnEnviar").disabled = false;
-      $("btnEnviar").textContent = modo === "criar" ? "Criar conta" : "Entrar";
+      if (!mfaPendente) {
+        $("btnEnviar").textContent = modo === "criar" ? "Criar conta"
+          : modo === "recuperar" ? ROTULO.recuperar : "Entrar";
+      }
+      pintarMedidor();
     }
   };
+
 })();
 </script>
 </body>

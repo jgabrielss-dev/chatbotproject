@@ -5,8 +5,16 @@ CREATE TABLE IF NOT EXISTS agentes (
   nome TEXT NOT NULL,
   system_prompt TEXT NOT NULL DEFAULT '',
   ativo BOOLEAN NOT NULL DEFAULT TRUE,
+  -- 'produto', 'suporte' ou 'prompt': agente interno da plataforma (itens 7,
+  -- 12 e 13). NULL em todo agente de cliente. A identidade dele — o prompt —
+  -- vem de app/agentes_internos.py, e não desta coluna; ela existe para a
+  -- linha não entrar na lista editável do painel. Ver
+  -- supabase/migrations/0007_agentes_internos.sql.
+  interno TEXT,
   criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agentes_interno
+  ON agentes (interno) WHERE interno IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS canais (
   id SERIAL PRIMARY KEY,
@@ -14,7 +22,9 @@ CREATE TABLE IF NOT EXISTS canais (
   -- 'whatsapp' e 'instagram' são integrações NÃO OFICIAIS (Evolution/Baileys e
   -- instagrapi). As oficiais da Meta ficam em 'whatsapp_oficial' e
   -- 'instagram_oficial'. Ver supabase/migrations/0003_canais_meta_oficial.sql.
-  tipo TEXT NOT NULL CHECK (tipo IN ('telegram', 'whatsapp', 'instagram', 'webhook', 'whatsapp_oficial', 'instagram_oficial')),
+  -- 'site' e o canal dos chats internos da plataforma (itens 7, 12, 13). Ver
+  -- supabase/migrations/0007_agentes_internos.sql.
+  tipo TEXT NOT NULL CHECK (tipo IN ('telegram', 'whatsapp', 'instagram', 'webhook', 'whatsapp_oficial', 'instagram_oficial', 'site')),
   nome TEXT NOT NULL,
   config JSONB NOT NULL DEFAULT '{}'::jsonb,
   ativo BOOLEAN NOT NULL DEFAULT TRUE,
@@ -23,6 +33,10 @@ CREATE TABLE IF NOT EXISTS canais (
 
 CREATE INDEX IF NOT EXISTS idx_canais_agente ON canais (agente_id);
 CREATE INDEX IF NOT EXISTS idx_canais_tipo ON canais (tipo);
+-- Um canal 'site' por agente interno (itens 7, 12, 13). UNIQUE para o UPSERT
+-- do boot ser idempotente. Ver supabase/migrations/0007_agentes_internos.sql.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canais_site
+  ON canais (agente_id) WHERE tipo = 'site';
 -- Roteamento dos webhooks oficiais da Meta (o canal é resolvido pelo
 -- phone_number_id / ig_user_id do evento, sem segredo na URL).
 CREATE INDEX IF NOT EXISTS idx_canais_tipo_identificador
@@ -124,9 +138,14 @@ ALTER TABLE app_config ENABLE ROW LEVEL SECURITY;
 -- Um perfil por conta do Supabase Auth. `id` e o mesmo uuid de auth.users.
 CREATE TABLE IF NOT EXISTS perfis (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  nome TEXT,
   email TEXT,
   role TEXT NOT NULL DEFAULT 'usuario' CHECK (role IN ('admin', 'usuario')),
   bloqueado BOOLEAN NOT NULL DEFAULT false,
+  -- A fonte da verdade do 2FA e o Supabase Auth (auth.mfa_factors). Isto aqui
+  -- diz se a NOSSA API exige o segundo fator: sem a coluna, um token `aal1`
+  -- continuaria valendo depois de a pessoa ativar o 2FA.
+  mfa_ativo BOOLEAN NOT NULL DEFAULT false,
   criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_perfis_role ON perfis (role);
@@ -238,3 +257,112 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA PUBLIC REVOKE ALL ON SEQUENCES FROM anon;
 -- isto nao abre nada: apenas permite que o RLS possa ser avaliado.
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated;
 ALTER DEFAULT PRIVILEGES IN SCHEMA PUBLIC GRANT SELECT ON TABLES TO authenticated;
+
+-- ==========================================================================
+-- Planos, assinatura, consumo e pagamentos
+--
+-- Mesmo conteudo da migration 0005_planos_e_cobranca.sql, mantido aqui pelo
+-- mesmo motivo do bloco acima: scripts/init_db.py aplica ESTE arquivo numa
+-- base nova. Preco e regra de cota vivem em app/cobranca.py (fonte da verdade,
+-- sem I/O, testavel); a tabela `planos` e o espelho que o app sincroniza no
+-- boot, e `assinaturas`/`consumo_mensagens` sao o estado de cada conta.
+--
+-- A virada de periodo NAO roda por cron: e avaliada na leitura
+-- (app.repos_cobranca.atualizar_periodo). Um plano pago nunca se renova
+-- sozinho -- renovar sem pagamento seria serviço de graca.
+-- ==========================================================================
+
+CREATE TABLE IF NOT EXISTS planos (
+  id TEXT PRIMARY KEY,
+  nome TEXT NOT NULL,
+  descricao TEXT NOT NULL DEFAULT '',
+  preco_mensal NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  preco_anual NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  max_agentes INTEGER NOT NULL,
+  max_canais_por_agente INTEGER NOT NULL,
+  max_mensagens_por_agente_mes INTEGER NOT NULL,
+  dias_gratis INTEGER NOT NULL DEFAULT 0,
+  ordem INTEGER NOT NULL DEFAULT 0,
+  ativo BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS assinaturas (
+  usuario_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  plano_id TEXT NOT NULL REFERENCES planos(id),
+  status TEXT NOT NULL DEFAULT 'ativo'
+    CHECK (status IN ('teste', 'ativo', 'expirado', 'cancelado')),
+  ciclo TEXT NOT NULL DEFAULT 'mensal' CHECK (ciclo IN ('mensal', 'anual')),
+  inicio_periodo TIMESTAMPTZ NOT NULL DEFAULT now(),
+  fim_periodo TIMESTAMPTZ NOT NULL,
+  plano_proximo TEXT REFERENCES planos(id),
+  ciclo_proximo TEXT CHECK (ciclo_proximo IN ('mensal', 'anual')),
+  cancela_em TIMESTAMPTZ,
+  criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+  atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_assinaturas_plano ON assinaturas (plano_id);
+CREATE INDEX IF NOT EXISTS idx_assinaturas_fim ON assinaturas (fim_periodo);
+
+-- Limite POR AGENTE (item 9): a chave inclui o agente de proposito, para que
+-- um cliente com 3 agentes nao esgote a cota de um so.
+CREATE TABLE IF NOT EXISTS consumo_mensagens (
+  usuario_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  agente_id INTEGER NOT NULL REFERENCES agentes(id) ON DELETE CASCADE,
+  mes TEXT NOT NULL,
+  mensagens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (usuario_id, agente_id, mes)
+);
+CREATE INDEX IF NOT EXISTS idx_consumo_mes ON consumo_mensagens (mes);
+
+CREATE TABLE IF NOT EXISTS pagamentos (
+  id BIGSERIAL PRIMARY KEY,
+  usuario_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  plano_id TEXT NOT NULL REFERENCES planos(id),
+  ciclo TEXT NOT NULL CHECK (ciclo IN ('mensal', 'anual')),
+  valor NUMERIC(10, 2) NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pendente'
+    CHECK (status IN ('pendente', 'pago', 'falhou', 'cancelado')),
+  metodo TEXT NOT NULL DEFAULT '',
+  referencia TEXT NOT NULL DEFAULT '',
+  qr_code TEXT NOT NULL DEFAULT '',
+  expira_em TIMESTAMPTZ,
+  criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+  pago_em TIMESTAMPTZ,
+  aplicado_em TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pagamentos_usuario ON pagamentos (usuario_id, criado_em DESC);
+CREATE INDEX IF NOT EXISTS idx_pagamentos_pendente ON pagamentos (status) WHERE status = 'pendente';
+CREATE INDEX IF NOT EXISTS idx_pagamentos_referencia ON pagamentos (referencia);
+
+-- Migração de bases que já existem: `init_db.py` aplica ESTE arquivo, e o
+-- CREATE TABLE IF NOT EXISTS acima não altera tabela criada antes. As colunas
+-- do checkout PIX (item "cobrança real") chegam por ALTER idempotente.
+ALTER TABLE pagamentos ADD COLUMN IF NOT EXISTS qr_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE pagamentos ADD COLUMN IF NOT EXISTS expira_em TIMESTAMPTZ;
+
+ALTER TABLE planos ENABLE ROW LEVEL SECURITY;
+-- `planos` e leitura publica: a home mostra a tabela de precos para quem nem
+-- esta logado ainda, e nao ha nada sensivel na tabela.
+CREATE POLICY planos_publico ON planos FOR SELECT USING (ativo);
+
+ALTER TABLE assinaturas ENABLE ROW LEVEL SECURITY;
+CREATE POLICY assinaturas_own ON assinaturas FOR ALL
+  USING (auth.uid() = usuario_id)
+  WITH CHECK (auth.uid() = usuario_id);
+
+ALTER TABLE consumo_mensagens ENABLE ROW LEVEL SECURITY;
+CREATE POLICY consumo_own ON consumo_mensagens FOR ALL
+  USING (auth.uid() = usuario_id)
+  WITH CHECK (auth.uid() = usuario_id);
+
+ALTER TABLE pagamentos ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pagamentos_own ON pagamentos FOR ALL
+  USING (auth.uid() = usuario_id)
+  WITH CHECK (auth.uid() = usuario_id);
+
+-- As tabelas novas entram no grant da service_role e perdem o acesso do anon,
+-- que o bloco acima ja aplicava a "todas". Repetido aqui para quem le este
+-- arquivo de cima para baixo sem ligar: o padrao do Postgres NAO e o mesmo
+-- grant que o Supabase instala.
+GRANT ALL ON planos, assinaturas, consumo_mensagens, pagamentos TO service_role;
+REVOKE ALL ON planos, assinaturas, consumo_mensagens, pagamentos FROM anon;

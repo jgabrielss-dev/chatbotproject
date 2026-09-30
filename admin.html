@@ -9,6 +9,23 @@
 <body>
 <div id="toasts"></div>
 
+<!-- Atendimento humano (item 13): botão flutuante que abre o chat no canto da
+     tela. O agente de suporte vê a conta de quem está logado — o admin inclusive. -->
+<button class="suporte-flut" id="suporteBotao" type="button" title="Falar com o atendimento">💬</button>
+<div class="chat-js suporte-modal hidden" id="suporteModal" aria-label="Atendimento">
+  <div class="cab">
+    <span>Atendimento</span>
+    <button class="fechar" id="suporteFechar" type="button" title="Fechar">×</button>
+  </div>
+  <div class="chat-lista" id="suporteLista" aria-live="polite"></div>
+  <div class="chat-anexos" id="suporteAnexos"></div>
+  <div class="chat-entrada">
+    <textarea class="chat-campo" id="suporteCampo" rows="1"
+              placeholder="Posso ver sua conta, trocar plano, cancelar…"></textarea>
+    <button class="chat-enviar" id="suporteEnviar" type="button">Enviar</button>
+  </div>
+</div>
+
   <div id="gate" class="gate">
     <div class="card">
       <h2>Carregando…</h2>
@@ -19,7 +36,10 @@
 <aside>
   <h1>Chatbot Project</h1>
   <p class="sub">Gestão de agentes e canais</p>
-  <button class="btn sm" id="btnContas" style="width:100%;margin-top:6px">Contas</button>
+  <div class="row" style="margin-top:6px">
+    <button class="btn sm" id="btnContas" style="flex:1">Contas</button>
+    <button class="btn sm" id="btnPerfil" style="flex:1">Perfil</button>
+  </div>
   <button class="btn primary" id="btnNovo" style="width:100%">+ Novo agente</button>
   <div class="row" style="margin-top:8px">
     <button class="btn sm" id="btnSair" style="flex:1">Sair</button>
@@ -38,6 +58,48 @@
       servidor — o botão aqui só pede a mudança.
     </p>
     <div id="contasLista"></div>
+  </div>
+
+  <div class="card hidden" id="perfilCard" style="margin:0 0 12px">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Perfil da operação</h2>
+      <button class="btn sm" id="btnFecharPerfil">Fechar</button>
+    </div>
+    <p class="muted">
+      O mesmo que o cliente vê na aba Conta, com um campo a mais. Estes dados são
+      globais: valem para todos os usuários e para a página de venda.
+    </p>
+
+    <h3 style="margin:18px 0 4px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)">Seus dados</h3>
+    <label>Seu nome</label>
+    <input type="text" id="perfilNome" maxlength="120" placeholder="Como quer ser chamado">
+    <label>Seu e-mail de acesso</label>
+    <input type="text" id="perfilEmail" disabled>
+    <p class="muted" style="margin:6px 0 0">
+      O e-mail é a identidade de login e é gerenciado no Supabase; aqui aparece
+      só para conferência.
+    </p>
+
+    <h3 style="margin:22px 0 4px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)">Atendimento</h3>
+    <label for="perfilSuporte">E-mail de atendimento</label>
+    <input type="email" id="perfilSuporte" placeholder="suporte@empresa.com">
+    <p class="muted" style="margin:6px 0 0">
+      É o endereço que o site mostra para "fale com a gente" e o que a tela de
+      recuperação de senha sugere quando o e-mail não sai. Deixe vazio para
+      esconder o link em vez de mandar o cliente para um endereço que não existe.
+    </p>
+
+    <div class="aviso" id="perfilAviso"></div>
+    <div class="acoes row" style="margin-top:14px">
+      <button class="btn primary" id="perfilSalvar">Salvar</button>
+    </div>
+
+    <h3 style="margin:22px 0 4px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)">Onde este e-mail aparece</h3>
+    <ul class="muted" style="margin:6px 0 0;padding-left:18px">
+      <li id="perfilUso1">página de venda</li>
+      <li id="perfilUso2">tela de recuperação de senha</li>
+      <li id="perfilUso3">chat de suporte (item 13)</li>
+    </ul>
   </div>
 
 <main>
@@ -106,6 +168,7 @@
 </main>
 
 <script src="auth.js"></script>
+<script src="chat.js"></script>
 <script>
 (async () => {
 const $ = (id) => document.getElementById(id);
@@ -637,7 +700,7 @@ function camposPorTipo(tipo, config = {}, novo = false) {
   if (tipo === "webhook") return `
     <p class="muted">Nenhuma credencial necessária. Salve o canal e a URL com o segredo é gerada automaticamente.</p>
     <p class="muted" style="margin-top:6px"><strong>Como chamar (a resposta vem no mesmo request):</strong></p>
-    <pre class="mono" style="background:#111;color:#eee;padding:10px;border-radius:8px;overflow:auto">&nbsp;curl -X POST "URL_DO_CANAL" \\
+    <pre class="mono" style="padding:10px;overflow:auto">&nbsp;curl -X POST "URL_DO_CANAL" \\
 &nbsp;  -H "Content-Type: application/json" \\
 &nbsp;  -d '{"user":"joao","text":"oi, quero um orcamento"}'</pre>
     <p class="muted">A resposta vem em <code>{"reply":"...","status":"respondido"}</code>. Se a IA demorar
@@ -688,7 +751,7 @@ function mostrarFormNovoCanal() {
   const tipo = $("novoCanalTipo").value;
   const cont = $("novoCanalForm");
   cont.innerHTML = `
-    <div class="card" style="background:#14161f;margin:0 0 12px">
+    <div class="card" style="background:var(--panel-2);margin:0 0 12px">
       <h2>Novo canal: ${tipo}</h2>
       <label>Nome do canal</label>
       <input type="text" id="nNome" placeholder="Ex.: WhatsApp do cliente A">
@@ -738,9 +801,11 @@ $("btnNovoCanal").onclick = () => {
 let contasCache = [];
 
 async function alternarContas() {
-  const card = $("contasCard");
-  card.classList.toggle("hidden");
-  if (card.classList.contains("hidden")) return;
+  // `fecharCards` (e nao um toggle cru) porque o card de perfil tambem é um card
+  // da sidebar: dois abertos ao mesmo tempo empilham e a pessoa edita o errado.
+  const abrindo = $("contasCard").classList.contains("hidden");
+  fecharCards(abrindo ? "contasCard" : "");
+  if (!abrindo) return;
   $("contasLista").innerHTML = '<p class="muted">carregando…</p>';
   await carregarContas();
 }
@@ -815,7 +880,65 @@ if (!eu) {
 if (!eu.eh_admin) { location.replace(Auth.pagina("painel")); throw new Error("nao e admin"); }
 
 $("btnSair").onclick = () => Auth.sair();
-$("btnContas").onclick = () => alternarContas();
+/* ---------- aba de perfil (item 10) ---------- */
+/* Os dois cards da sidebar (Contas e Perfil) não ficam abertos juntos: dois
+   cards empilhados fazem a sidebar parecer quebrada e a pessoa acabar
+   editando a tela errada. */
+function fecharCards(abrir) {
+  $("contasCard").classList.toggle("hidden", abrir !== "contasCard");
+  $("perfilCard").classList.toggle("hidden", abrir !== "perfilCard");
+}
+
+async function carregarPerfil() {
+  try {
+    const c = await api("/api/admin/config");
+    $("perfilNome").value = c.nome || "";
+    $("perfilEmail").value = c.email || "";
+    $("perfilSuporte").value = c.email_atendimento || "";
+    $("perfilAviso").textContent = "";
+  } catch (e) {
+    $("perfilAviso").style.color = "var(--danger)";
+    $("perfilAviso").textContent = e.message;
+  }
+}
+
+$("btnPerfil").onclick = () => {
+  const abrindo = $("perfilCard").classList.contains("hidden");
+  fecharCards(abrindo ? "perfilCard" : "");
+  if (abrindo) carregarPerfil();
+};
+
+$("btnFecharPerfil").onclick = () => fecharCards("");
+$("btnFecharContas").onclick = () => fecharCards("");
+
+$("perfilSalvar").onclick = async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  $("perfilAviso").textContent = "";
+  try {
+    const nome = $("perfilNome").value.trim();
+    const suporte = $("perfilSuporte").value.trim();
+    const salvo = await api("/api/admin/config", {
+      method: "PUT",
+      body: JSON.stringify({ nome: nome, email_atendimento: suporte })
+    });
+    $("perfilNome").value = salvo.nome || "";
+    $("perfilSuporte").value = salvo.email_atendimento || "";
+    $("perfilAviso").style.color = "var(--accent-2)";
+    $("perfilAviso").textContent = salvo.email_atendimento
+      ? "Salvo. Esse e-mail passa a valer em toda a plataforma."
+      : "Salvo. Sem e-mail de atendimento, os links de suporte ficam escondidos.";
+  } catch (e) {
+    $("perfilAviso").style.color = "var(--danger)";
+    $("perfilAviso").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("btnContas").onclick = () => {
+  alternarContas();
+};
 
 Auth.esconderGate();
 await carregarAgentes();
@@ -824,6 +947,40 @@ timerFila = setInterval(atualizarFila, 15000);
 if (ABRINDO_DO_DISCO) {
   toast("Você abriu o arquivo do disco: a API está em " + API_RENDER + ". Melhor usar o endereço do servidor.", "err");
 }
+
+// ---- suporte (item 13) ---------------------------------------------------
+// O mesmo botão flutuante do painel: abre o atendimento no canto da tela. No
+// admin não há aba de pagamentos para apontar, então só o e-mail de contato
+// ganha atalho quando o agente devolver a ação de falar com a equipe.
+const abrirSuporte = () => {
+  $("suporteModal").classList.remove("hidden");
+  $("suporteBotao").classList.add("hidden");
+};
+const fecharSuporte = () => {
+  $("suporteModal").classList.add("hidden");
+  $("suporteBotao").classList.remove("hidden");
+};
+$("suporteBotao").onclick = abrirSuporte;
+$("suporteFechar").onclick = fecharSuporte;
+
+Chat.iniciar({
+  chave: "suporte",
+  lista: "suporteLista",
+  campo: "suporteCampo",
+  enviar: "suporteEnviar",
+  chips: "suporteAnexos",
+  comHistorico: true,
+  aoAcao: (acao, lista) => {
+    if (acao.nome === "falar_com_time" && acao.dados
+        && /\S+@\S+\.\S+/.test(acao.dados.email || "")) {
+      const a = document.createElement("a");
+      a.className = "chat-botao ghost";
+      a.href = "mailto:" + acao.dados.email;
+      a.textContent = "Escrever para " + acao.dados.email;
+      lista.appendChild(a);
+    }
+  },
+});
 })();
 </script>
 </body>

@@ -105,7 +105,7 @@ async def criar_perfil(usuario_id: str, email: str, role: str = "usuario") -> di
         row = await con.fetchrow(
             """INSERT INTO perfis (id, email, role) VALUES ($1, $2, $3)
                ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email
-               RETURNING id, email, role, bloqueado, criado_em""",
+               RETURNING id, nome, email, role, bloqueado, mfa_ativo, criado_em""",
             usuario_id, email or "", role,
         )
     return dict(row)
@@ -115,10 +115,57 @@ async def obter_perfil(usuario_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as con:
         row = await con.fetchrow(
-            "SELECT id, email, role, bloqueado, criado_em FROM perfis WHERE id = $1",
+            "SELECT id, nome, email, role, bloqueado, mfa_ativo, criado_em FROM perfis WHERE id = $1",
             usuario_id,
         )
     return dict(row) if row else None
+
+
+async def atualizar_nome_perfil(usuario_id: str, nome: str) -> None:
+    """Nome de exibição. O e-mail NÃO muda aqui: o login é no Supabase Auth."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute("UPDATE perfis SET nome = $2 WHERE id = $1", usuario_id, nome or "")
+
+
+async def ler_config(chave: str, padrao: str = "") -> str:
+    """Valor de `app_config`. Ausente devolve o padrão, não None.
+
+    `app_config` guarda o e-mail de atendimento (item 10) e a lista de admins
+    que o trigger do banco lê. Uma chave nova não precisa de migration: ela é
+    criada no primeiro `gravar_config`.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        valor = await con.fetchval("SELECT valor FROM app_config WHERE chave = $1", chave)
+    return padrao if valor is None else str(valor)
+
+
+async def gravar_config(chave: str, valor: str) -> None:
+    """Upsert em `app_config`. `valor` é sempre TEXT; a lista de admins é
+    separada por linha, e quem consome faz o split."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            """INSERT INTO app_config (chave, valor) VALUES ($1, $2)
+               ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor""",
+            chave, valor or "",
+        )
+
+
+async def definir_mfa_ativo(usuario_id: str, ativo: bool) -> None:
+    """Liga ou desliga a exigencia do segundo fator na nossa API.
+
+    Quem chama precisa ter um token `aal2`: e o jeito de provar, sem trocar
+    nenhum segredo com o GoTrue, que a pessoa tem o app autenticador na mao.
+    Apagar o fator no Supabase tambem exige `aal2`, entao o mesmo prova vale
+    para desligar -- nao existe caminho para contornar o 2FA pelo painel.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        await con.execute(
+            "UPDATE perfis SET mfa_ativo = $2 WHERE id = $1", usuario_id, bool(ativo)
+        )
 
 
 async def atualizar_email_perfil(usuario_id: str, email: str) -> None:
@@ -162,7 +209,7 @@ async def listar_perfis() -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as con:
         rows = await con.fetch(
-            """SELECT p.id, p.email, p.role, p.bloqueado, p.criado_em,
+            """SELECT p.id, p.nome, p.email, p.role, p.bloqueado, p.criado_em,
                       (SELECT count(*) FROM agentes a WHERE a.dono_id = p.id) AS agentes
                FROM perfis p
                ORDER BY (p.role = 'admin') DESC, lower(p.email) ASC"""
@@ -188,6 +235,12 @@ async def listar_agentes(dono_id: str | None) -> list[dict]:
 
     Mesmo quando a lista é restrita, cada linha volta com o total de sessões:
     o painel do cliente mostra uso real e não só o cadastro.
+
+    `interno IS NULL` em ambos os casos: os agentes da plataforma (itens 7, 12 e
+    13) não são de ninguém, e por isso apareceriam na lista do admin — que
+    enxerga tudo. Eles não são cadastro de agente, são código
+    (`app/agentes_internos.py`), e uma tela que lista e oferece editar um
+    arquivo de código é um convite a editá-lo.
     """
     pool = await get_pool()
     async with pool.acquire() as con:
@@ -201,9 +254,12 @@ async def listar_agentes(dono_id: str | None) -> list[dict]:
                FROM agentes a
                LEFT JOIN perfis p ON p.id = a.dono_id"""
         if dono_id is None:
-            rows = await con.fetch(base + " ORDER BY a.criado_em DESC")
+            rows = await con.fetch(
+                base + " WHERE a.interno IS NULL ORDER BY a.criado_em DESC")
         else:
-            rows = await con.fetch(base + " WHERE a.dono_id = $1 ORDER BY a.criado_em DESC", dono_id)
+            rows = await con.fetch(
+                base + " WHERE a.dono_id = $1 AND a.interno IS NULL"
+                " ORDER BY a.criado_em DESC", dono_id)
     return [dict(r) for r in rows]
 
 
@@ -233,19 +289,24 @@ async def obter_agente(agente_id: int, dono_id: str | None) -> dict | None:
 async def atualizar_agente(
     agente_id: int, nome: str, system_prompt: str, ativo: bool, dono_id: str | None
 ) -> dict | None:
+    # `interno IS NULL` no WHERE: os agentes da plataforma não são cadastro, e
+    # editar o prompt da linha não mudaria o agente de verdade (o prompt vem
+    # de `app/agentes_internos.py`). O que a edição faria é tirar o agente do
+    # ar enquanto a tela mostra que ele está editável — o item 14 fala em não
+    # poder desviar, e esta é a porta por onde isso aconteceria.
     pool = await get_pool()
     async with pool.acquire() as con:
         if dono_id is None:
             row = await con.fetchrow(
                 """UPDATE agentes SET nome = $1, system_prompt = $2, ativo = $3
-                   WHERE id = $4
+                   WHERE id = $4 AND interno IS NULL
                    RETURNING id, nome, system_prompt, ativo, dono_id, criado_em""",
                 nome, system_prompt, ativo, agente_id,
             )
         else:
             row = await con.fetchrow(
                 """UPDATE agentes SET nome = $1, system_prompt = $2, ativo = $3
-                   WHERE id = $4 AND dono_id = $5
+                   WHERE id = $4 AND dono_id = $5 AND interno IS NULL
                    RETURNING id, nome, system_prompt, ativo, dono_id, criado_em""",
                 nome, system_prompt, ativo, agente_id, dono_id,
             )
@@ -256,12 +317,82 @@ async def excluir_agente(agente_id: int, dono_id: str | None) -> bool:
     pool = await get_pool()
     async with pool.acquire() as con:
         if dono_id is None:
-            result = await con.execute("DELETE FROM agentes WHERE id = $1", agente_id)
+            result = await con.execute(
+                "DELETE FROM agentes WHERE id = $1 AND interno IS NULL", agente_id)
         else:
             result = await con.execute(
-                "DELETE FROM agentes WHERE id = $1 AND dono_id = $2", agente_id, dono_id
+                "DELETE FROM agentes WHERE id = $1 AND dono_id = $2 AND interno IS NULL",
+                agente_id, dono_id,
             )
     return "DELETE 1" in result
+
+
+# --------------------------------------------------------------------------
+# Agentes internos (itens 7, 12, 13)
+#
+# A linha existe por dois motivos práticos e nenhum de identidade: `sessoes`
+# tem `agente_id NOT NULL` e `canais` tem `agente_id NOT NULL`, então o chat
+# interno precisa de um par agente/canal para gravar a conversa. A identidade
+# do agente — nome e prompt — NÃO sai daqui: vem de `app/agentes_internos.py`.
+# Editar esta linha não muda o que o agente responde, e o item 14 pede
+# exatamente isso.
+# --------------------------------------------------------------------------
+
+
+async def garantir_agentes_internos(definicoes: list[tuple[str, str, str]]) -> list[dict]:
+    """Cria (ou reaproveita) agente e canal 'site' de cada agente interno.
+
+    `definicoes` é `[(chave, nome, slug_do_canal), ...]`. Roda no boot, e é
+    idempotente pelo `interno`: subir de novo não cria um segundo agente nem
+    perde o histórico de quem já conversou.
+
+    O `system_prompt` gravado é o do código, mas só como registro: a rota de
+    chat sempre usa `agentes_internos.PRODUTO.prompt`, nunca a coluna. Deixar a
+    coluna sincronizada evita que alguém que forje um agente interno na linha
+    (ou leia a tabela) veja um prompt diferente do que o agente usa.
+    """
+    pool = await get_pool()
+    saida: list[dict] = []
+    async with pool.acquire() as con:
+        for chave, nome, system_prompt in definicoes:
+            agente = await con.fetchrow(
+                """INSERT INTO agentes (nome, system_prompt, interno, ativo)
+                   VALUES ($1, $2, $3, TRUE)
+                   ON CONFLICT (interno) WHERE interno IS NOT NULL
+                   DO UPDATE SET nome = EXCLUDED.nome,
+                                 system_prompt = EXCLUDED.system_prompt
+                   RETURNING id, nome, system_prompt, ativo, dono_id, interno""",
+                nome, system_prompt, chave,
+            )
+            canal = await con.fetchrow(
+                """INSERT INTO canais (agente_id, tipo, nome, config, ativo)
+                   VALUES ($1, 'site', $2, $3::jsonb, TRUE)
+                   ON CONFLICT (agente_id) WHERE tipo = 'site'
+                   DO UPDATE SET nome = EXCLUDED.nome
+                   RETURNING id, agente_id, tipo, nome, config, ativo""",
+                agente["id"], f"chat interno: {chave}", _json({"interno": chave}),
+            )
+            saida.append({"agente": dict(agente), "canal": dict(canal)})
+    return saida
+
+
+async def par_interno(chave: str) -> tuple[dict, dict] | None:
+    """(agente, canal) do agente interno. `None` se ele não foi criado ainda."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        agente = await con.fetchrow(
+            """SELECT id, nome, system_prompt, ativo, dono_id, interno FROM agentes
+               WHERE interno = $1""", chave,
+        )
+        if not agente:
+            return None
+        canal = await con.fetchrow(
+            """SELECT id, agente_id, tipo, nome, config, ativo FROM canais
+               WHERE agente_id = $1 AND tipo = 'site'""", agente["id"],
+        )
+    if not canal:
+        return None
+    return dict(agente), dict(canal)
 
 
 async def reivindicar_agentes_sem_dono(dono_id: str) -> int:
@@ -275,7 +406,10 @@ async def reivindicar_agentes_sem_dono(dono_id: str) -> int:
     pool = await get_pool()
     async with pool.acquire() as con:
         result = await con.execute(
-            "UPDATE agentes SET dono_id = $1 WHERE dono_id IS NULL", dono_id
+            # `interno IS NULL` também aqui: um agente interno não tem dono, mas
+            # "reivindicar" não pode fazer dele do agente de ninguém — a casa do
+            # agente interno é o código (app/agentes_internos.py), não a conta.
+            "UPDATE agentes SET dono_id = $1 WHERE dono_id IS NULL AND interno IS NULL", dono_id
         )
     total = int(result.rsplit(" ", 1)[-1]) if result else 0
     if total:
@@ -530,6 +664,18 @@ async def obter_sessao_do_dono(sessao_id: int, dono_id: str | None) -> dict | No
 
 # ---------- Mensagens ----------
 
+async def registrar_consumo(usuario_id: str | None, agente_id: int, quantidade: int = 1) -> None:
+    """Conta 1 mensagem na cota do agente. Encaminha para o bloco de cobrança.
+
+    Existe aqui (e não só em `repos_cobranca`) porque `pipeline.py` já conversa
+    com `repo.` e um import a mais ali só criaria um segundo nome para a mesma
+    coisa. `dono_id` nulo (agente legado) não conta para ninguém.
+    """
+    from app.repos_cobranca import registrar_consumo as _registrar
+
+    await _registrar(usuario_id, agente_id, quantidade)
+
+
 async def salvar_mensagem(sessao_id: int, de_ia: bool, texto: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as con:
@@ -556,6 +702,45 @@ async def ultimos_trechos(sessao_id: int, limite: int = 6) -> list[str]:
     """Últimas mensagens em texto (para atualização de memória)."""
     hist = await historico_sessao(sessao_id, limite)
     return [f"{'assistente' if m['de_ia'] else 'usuario'}: {m['texto']}" for m in hist]
+
+
+async def id_da_sessao(agente_id: int, canal_id: int, usuario_externo: str) -> int | None:
+    """O id da sessão (agente, canal, pessoa), ou None se ainda não existe.
+
+    Existe para o front recarregar a conversa sem criá-la: perguntar o histórico
+    de uma conversa que ninguém começou não deveria gravar uma linha nova.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """SELECT id FROM sessoes
+               WHERE agente_id = $1 AND canal_id = $2 AND usuario_externo = $3""",
+            agente_id, canal_id, usuario_externo,
+        )
+    return int(row["id"]) if row else None
+
+
+async def contar_mensagens_da_sessao(agente_id: int, canal_id: int,
+                                    usuario_externo: str) -> int:
+    """Quantas vezes a PESSOA falou nesta conversa.
+
+    Só as mensagens dela: a cota do item 14 para o agente da home é "quantas
+    perguntas o visitante pode fazer", e contar a resposta do agente faria a
+    conversa acabar mais rápido quanto mais elle corresse.
+
+    A contagem vai no banco, e não em memória, porque memória morre no restart
+    do Render — e um limite que se resolve com F5 não é limite.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            """SELECT count(*) AS total FROM mensagens m
+               JOIN sessoes s ON s.id = m.sessao_id
+               WHERE s.agente_id = $1 AND s.canal_id = $2
+                 AND s.usuario_externo = $3 AND m.de_ia = FALSE""",
+            agente_id, canal_id, usuario_externo,
+        )
+    return int(row["total"]) if row else 0
 
 
 async def mensagens_da_sessao(sessao_id: int, limite: int = 200) -> list[dict]:
@@ -610,6 +795,12 @@ async def salvar_na_caixa(
 _COLS_CAIXA = (
     "c.id, c.canal_id, c.remetente, c.texto, c.origem, c.status, c.tentativas, "
     "c.ultimo_erro, c.criado_em, c.proxima_tentativa, c.processado_em, "
+    # `payload_json` entra na lista porque e de onde sai a REFERENCIA do
+    # anexo (item 15): url, base64 ou o id que o canal reconhece. O worker
+    # nao baixa nada aqui - ele so precisa saber que ha anexo e onde
+    # busca-lo. Sem esta coluna, `listar_caixa_para_processar` devolvia um
+    # item sem informacao de midia e o item 15 seria um botao morto.
+    "c.payload_json, "
     "k.tipo AS tipo, k.nome AS canal_nome"
 )
 _JOIN_CAIXA = "FROM caixa_entrada c LEFT JOIN canais k ON k.id = c.canal_id"

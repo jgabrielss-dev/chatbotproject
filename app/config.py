@@ -63,6 +63,33 @@ class Settings:
     supabase_url: str = os.getenv("SUPABASE_URL", "").rstrip("/")
     supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
 
+    # ------------------------------------------------------------------
+    # Mercado Pago (cobrança real, PIX)
+    # ------------------------------------------------------------------
+    # O gateway liga pela presença da chave de acesso: com o PAT configurado
+    # as rotas de checkout criam PIX de verdade e o webhook confirma; sem o
+    # PAT o app segue funcionando 100% (né o min 0 da home) mas devolve 503
+    # no checkout, em vez de "confirmar" pagamento que não aconteceu.
+    mercadopago_pat: str = os.getenv("MERCADOPAGO_PAT", "")
+    mercadopago_pk: str = os.getenv("MERCADOPAGO_PK", "")
+    # Segredo opcional de assinatura do webhook. Sem ele confiamos na
+    # consulta reversa à API do MP (fonte da verdade), que é segura; com ele,
+    # só aceitamos webhook assinado (anti-falsificação de notificação).
+    mercadopago_webhook_secret: str = os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "")
+
+    # E-mails que NUNCA precisam pagar: o dono/operador da plataforma e a
+    # conta de teste. Quem está na lista recebe o plano máximo sem checkout —
+    # é a garantia de que a operação própria não fica trancada atrás do
+    # próprio funil de cobrança.
+    contas_isentas: frozenset[str] = frozenset(
+        e.strip().lower()
+        for e in os.getenv(
+            "CONTAS_ISENTAS",
+            "joaogabrielss.2007@gmail.com,jgkwy07@gmail.com",
+        ).split(",")
+        if e.strip()
+    )
+
     # Token de acesso do painel admin. OPCIONAL e fora do fluxo normal de login:
     # serve só como vidro quebrado de emergência, para recuperar o acesso se o
     # Supabase Auth ficar indisponível ou mal configurado. Vazio = desativado.
@@ -101,6 +128,12 @@ class Settings:
     @property
     def has_db(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def has_mercadopago(self) -> bool:
+        """Checkout PIX ligado. A chave pública sozinha não cobra nada: o PAT
+        é quem autoriza criar o pagamento; a PK é só o identificador público."""
+        return bool(self.mercadopago_pat)
 
     @property
     def supabase_functions_base(self) -> str:

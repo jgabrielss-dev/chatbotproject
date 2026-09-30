@@ -145,11 +145,18 @@
   /** Cria o cliente do Supabase na mão, para não depender de CDN. */
   function gotrue(c) {
     return {
-      signup: function (email, senha) {
+      signup: function (email, senha, meta) {
+        // `data` vira `user_metadata` no Supabase Auth. Mandamos o nome com
+        // duas chaves porque integrações diferentes leem uma ou outra, e o
+        // que importa aqui é o trigger do banco ver o nome em conta nova.
         return fetch(c.supabase_url + "/auth/v1/signup", {
           method: "POST",
           headers: headersGotrue(c),
-          body: JSON.stringify({ email: email, password: senha })
+          body: JSON.stringify({
+            email: email,
+            password: senha,
+            data: Object.assign({ app: "chatbotproject" }, meta || {})
+          })
         });
       },
       signin: function (email, senha) {
@@ -180,7 +187,14 @@
     return { "Content-Type": "application/json", apikey: c.supabase_anon_key };
   }
 
-  /** Lê email/senha, chama o GoTrue e guarda o access_token. */
+  /**
+   * Lê e-mail/senha, chama o GoTrue e guarda o access_token.
+   *
+   * Devolve `{ mfa: true, fatorId }` quando a conta tem 2FA e o token saiu no
+   * nível 1. A tela do login abre o campo do código; nada da aplicação é
+   * carregado antes disso, porque a nossa API recusa token de nível 1 (item 5)
+   * — ou seja, o segundo fator é obrigatório, não um extra da tela.
+   */
   function entrar(email, senha) {
     return config().then(function (c) {
       return gotrue(c).signin(email, senha).then(function (r) {
@@ -188,15 +202,37 @@
           if (!r.ok) throw new Error(d.error_description || d.msg || "E-mail ou senha inválidos.");
           guardarToken(d.access_token);
           _sessao = null;
-          return obterSessao();
+          return segundoFatorPendente().then(function (pendente) {
+            if (pendente) return pendente;
+            return obterSessao();
+          });
         });
       });
     });
   }
 
-  function cadastrar(email, senha) {
+  /** O token atual é de nível 1 e a conta tem fator inscrito? */
+  function segundoFatorPendente() {
+    var token = lerToken();
+    if (!token) return Promise.resolve(null);
+    return estadoDaConta(token).then(function (u) {
+      if (u.aal === "aal2" || !u.factors || !u.factors.length) return null;
+      var fatores = u.factors.filter(function (f) { return f.status !== "unverified"; });
+      if (!fatores.length) return null;
+      return { mfa: true, fatorId: fatores[0].id };
+    }).catch(function () {
+      // Se a leitura da conta falhar, seguimos com a senha: o `/api/eu` volta
+      // e exige o segundo fator se ele for mesmo necessário. Inventar um
+      // "mfa" aqui mandaria a pessoa preencher um campo à toa.
+      return null;
+    });
+  }
+
+  function cadastrar(email, senha, nome) {
     return config().then(function (c) {
-      return gotrue(c).signup(email, senha).then(function (r) {
+      var meta = {};
+      if (nome) { meta.nome = nome; meta.full_name = nome; }
+      return gotrue(c).signup(email, senha, meta).then(function (r) {
         return r.json().then(function (d) {
           // 200 com sessão = confirmação de e-mail desligada, já entrou.
           // 200/422 sem sessão = o Supabase mandou o e-mail de confirmação.
@@ -265,6 +301,128 @@
     });
   }
 
+
+  /* ------------------------------------------------------- segundo fator */
+
+  /**
+   * Estado da sessão no GoTrue: traz `aal` e os fatores da conta. É o que
+   * decide se o login precisa de um código a mais, sem adivinhar por nada.
+   */
+  function estadoDaConta(token) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/user", {
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token }
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.error_description || d.msg || "Não foi possível ler a conta.");
+          return d;
+        });
+      });
+    });
+  }
+
+  function fatores(token) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/factors", {
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token }
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.error_description || d.msg || "Não foi possível ler os fatores.");
+          return Array.isArray(d.factors) ? d.factors : [];
+        });
+      });
+    });
+  }
+
+  /** Inscreve um autenticador. Devolve QR (data URI), segredo e uri otpauth. */
+  function inscreverFator(token, nome) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/factors", {
+        method: "POST",
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token,
+                   "Content-Type": "application/json" },
+        body: JSON.stringify({ friendly_name: nome || "App autenticador" })
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          // 422/400 com "MFA" é o projeto sem MFA habilitado no painel do
+          // Supabase. A mensagem padrão ("Invalid request") não diria nada.
+          if (!r.ok) {
+            var msg = d.error_description || d.msg || "";
+            if (/mfa/i.test(d.error_code || "") || /mfa|totp|multi/i.test(msg)) {
+              throw new Error("A verificação em duas etapas ainda não está habilitada "
+                + "no projeto. O administrador precisa ativá-la em Authentication → MFA.");
+            }
+            throw new Error(msg || "Não foi possível cadastrar o aplicativo autenticador.");
+          }
+          return d;
+        });
+      });
+    });
+  }
+
+  function desafiarFator(token, fatorId) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/factors/" + encodeURIComponent(fatorId) + "/challenge", {
+        method: "POST",
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token,
+                   "Content-Type": "application/json" },
+        body: "{}"
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.error_description || d.msg || "Não foi possível pedir o código.");
+          return d;
+        });
+      });
+    });
+  }
+
+  /**
+   * Confere o código. A resposta traz um access_token NOVO, de nível `aal2`:
+   * é este token que passa a valer, e é o que a nossa API exige quando a conta
+   * tem o 2FA ativo. Por isso o antigo é trocado aqui — guardá-lo deixaria a
+   * conta entrando com senha só.
+   */
+  function confirmarFator(token, fatorId, desafioId, codigo) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/factors/" + encodeURIComponent(fatorId) + "/verify", {
+        method: "POST",
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token,
+                   "Content-Type": "application/json" },
+        body: JSON.stringify(
+          // Na inscricao do fator nao existe desafio ainda: o GoTrue quer so
+          // o codigo. Mandar `challenge_id: null` faz a validacao do corpo
+          // recusar, entao a chave e omitida quando nao ha desafio.
+          desafioId ? { challenge_id: desafioId, code: String(codigo || "").trim() }
+                    : { code: String(codigo || "").trim() })
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) {
+            var m = d.error_description || d.msg || "";
+            throw new Error(/invalid|expired|mismatch|verif/i.test(m)
+              ? "Código inválido ou expirado. Confira o relógio do celular e tente de novo."
+              : (m || "Não foi possível confirmar o código."));
+          }
+          if (d.access_token) { guardarToken(d.access_token); _sessao = null; }
+          return d;
+        });
+      });
+    });
+  }
+
+  function removerFator(token, fatorId) {
+    return config().then(function (c) {
+      return fetch(c.supabase_url + "/auth/v1/factors/" + encodeURIComponent(fatorId), {
+        method: "DELETE",
+        headers: { apikey: c.supabase_anon_key, Authorization: "Bearer " + token }
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.error_description || d.msg || "Não foi possível remover.");
+          return d;
+        });
+      });
+    });
+  }
+
   /* ----------------------------------------------------------------- misc */
 
   function esc(s) {
@@ -299,6 +457,13 @@
     entrar: entrar,
     cadastrar: cadastrar,
     recuperar: recuperar,
+    estadoDaConta: estadoDaConta,
+    fatores: fatores,
+    inscreverFator: inscreverFator,
+    desafiarFator: desafiarFator,
+    confirmarFator: confirmarFator,
+    removerFator: removerFator,
+    segundoFatorPendente: segundoFatorPendente,
     sair: sair,
     esc: esc,
     mostrarGate: mostrarGate,

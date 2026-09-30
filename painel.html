@@ -6,9 +6,14 @@
 <title>Meus chatbots · Chatbot Project</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* O style.css do admin tem grid com sidebar. Aqui a sidebar vira barra de
-     topo, porque o cliente navega por seções e não por uma lista de agentes. */
-  body.painel { grid-template-columns: 1fr; }
+  /* O style.css do admin deixa o body em FLEX (sidebar de 300px + main). Não é
+     grid: trocar `grid-template-columns` não mudava NADA, e por isso topo, telas
+     e toasts viravam irmãos lado a lado. O certo é tirar o flex, como a home e
+     a tela de login já faziam com body.venda / body.home. */
+  body.painel { display: block; }
+  /* Sem sidebar não existe nada com max-width, e a tela esticaria de ponta a
+     ponta num monitor grande. O contentor é o mesmo limite do admin. */
+  .painel-conteudo { max-width: 1000px; margin: 0 auto; padding: 0 20px 60px; }
   .topo { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
           border-bottom: 1px solid var(--border); padding: 12px 0 14px; }
   .topo h1 { font-size: 20px; margin: 0; }
@@ -28,9 +33,50 @@
   .msg:last-child { border-bottom: 0; }
   .msg .de { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .vazio { color: var(--muted); font-size: 14px; padding: 10px 0; }
+  /* Item 2: cada canal é um cartão com as ações. O botão de excluir fica
+     separado por uma margem automática para não cair em cima do "editar"
+     quando o nome é longo. */
+  .canal-acoes { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+  /* A escolha do agente vem ANTES da lista de canais: o item 2 é "canais do
+     meu agente", e mostrar tudo junto deixaria ambíguo de quem é cada canal
+     antes de você editar. */
+  .barra-agente { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                  padding: 10px 12px; border: 1px solid var(--border);
+                  border-radius: 8px; margin-bottom: 12px; }
+  .barra-agente label { margin: 0; }
+  .grade-planos { display: grid; gap: 12px;
+                  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .plano { border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+           display: flex; flex-direction: column; gap: 8px; }
+  .plano.atual { border-color: var(--border-forte); background: var(--panel-2); }
+  .plano h3 { margin: 0; font-size: 16px; }
+  /* --- aba Conta: segurança (item 5) --- */
+.passos { padding-left: 20px; margin: 8px 0 12px; font-size: 13px; color: var(--muted); }
+.passos li { margin: 4px 0; }
+.rotulo { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+.erro { color: var(--danger); font-size: 13px; margin-top: 10px; min-height: 18px; }
+.aviso { color: var(--warn); font-size: 13px; margin-top: 10px; }
+#mfaEstado .badge { margin-right: 6px; }
+ul.recuperacao {
+  columns: 2; list-style: none; padding: 0; margin: 8px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+}
+ul.recuperacao li { margin: 2px 0; }
+.plano .preco { font-size: 24px; font-weight: 700; }
+  .plano .preco small { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .plano ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+  .plano .tag { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+                color: var(--muted); }
+  .uso { border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+         margin-bottom: 10px; }
+  .barra { height: 6px; background: var(--btn); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .barra i { display: block; height: 100%; background: var(--accent); }
+  .barra i.estouro { background: var(--danger); }
 </style>
 </head>
 <body class="painel">
+
+<div class="painel-conteudo">
 
 <div class="topo">
   <h1>Meus chatbots</h1>
@@ -39,6 +85,7 @@
     <button class="btn sm" data-tela="agentes">Agentes</button>
     <button class="btn sm" data-tela="conversas">Conversas</button>
     <button class="btn sm" data-tela="canais">Canais</button>
+    <button class="btn sm" data-tela="conta">Conta</button>
   </div>
   <div class="spaco"></div>
   <span class="eu" id="euEmail"></span>
@@ -94,15 +141,140 @@
 
   <section id="t-canais">
     <div class="card">
-      <h2>Canais</h2>
-      <p class="muted">Onde seus agentes atendem.</p>
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Canais</h2>
+        <button class="btn sm primary" id="btnNovoCanal">+ Novo canal</button>
+      </div>
+      <p class="muted">
+        Onde seus agentes atendem. Cada canal pertence a um agente — escolha o
+        agente para ver e editar os canais dele.
+      </p>
+      <div class="barra-agente">
+        <label for="selCanalAgente">Agente</label>
+        <select id="selCanalAgente" style="min-width:220px"></select>
+        <span class="muted" id="usoCanais"></span>
+      </div>
       <div id="canais"><p class="muted">carregando…</p></div>
+      <div class="hidden" id="canalForm"></div>
+    </div>
+  </section>
+
+  <section id="t-conta">
+    <div class="card">
+      <h2>Seu plano</h2>
+      <div id="planoAtual"><p class="muted">carregando…</p></div>
+    </div>
+    <div class="card">
+      <h2>Uso do mês</h2>
+      <p class="muted">
+        O limite de mensagens é <strong>por agente</strong> — por isso a barra
+        aparece uma vez por agente, e não uma barra somando tudo.
+      </p>
+      <div id="planoUso"><p class="muted">carregando…</p></div>
+    </div>
+    <div class="card">
+      <h2>Planos disponíveis</h2>
+      <p class="muted">
+        Mudar de plano entra em vigor no fim do período que você já pagou —
+        nada do que você tem é apagado, e o plano novo não corta nada antes da
+        data.
+      </p>
+      <div class="grade-planos" id="planoGrade"></div>
+      <div id="planoAviso"></div>
+    </div>
+    <div class="card">
+      <h2>Seus dados</h2>
+      <label for="perfilNome">Nome</label>
+      <input type="text" id="perfilNome" maxlength="120" placeholder="Como quer ser chamado">
+      <label for="perfilEmail">E-mail de acesso</label>
+      <input type="text" id="perfilEmail" disabled>
+      <p class="muted" style="margin-top:6px">
+        O e-mail é a identidade de login e é gerenciado no Supabase; aqui ele
+        aparece só para conferência.
+      </p>
+      <div class="acoes row" style="margin-top:14px">
+        <button class="btn primary" id="perfilSalvar">Salvar dados</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Verificação em duas etapas</h2>
+      <p class="muted">
+        Além da senha, pedimos um código do seu aplicativo autenticador a cada
+        entrada. É o que impede quem roubar a senha de entrar na sua conta.
+      </p>
+      <div id="mfaEstado"><p class="muted">carregando…</p></div>
+
+      <div class="hidden" id="mfaAtivar">
+        <ol class="passos">
+          <li>Abra o aplicativo autenticador no celular.</li>
+          <li>Adicione uma conta e escaneie o QR abaixo.</li>
+          <li>Digite o código de 6 dígitos que aparecer.</li>
+        </ol>
+        <div class="qrcode"><img id="mfaQr" alt="QR code do aplicativo autenticador"></div>
+        <p class="muted" style="margin-top:8px">Sem câmera? Digite a chave no app:
+          <code id="mfaSegredo"></code></p>
+        <label for="mfaCodigo" class="rotulo">Código do aplicativo</label>
+        <input type="text" id="mfaCodigo" inputmode="numeric" maxlength="6"
+               autocomplete="one-time-code" placeholder="000000">
+        <div class="acoes row" style="margin-top:12px">
+          <button class="btn primary" id="mfaConfirmar">Ativar</button>
+          <button class="btn" id="mfaCancelar">Cancelar</button>
+        </div>
+        <div class="erro" id="mfaErro"></div>
+        <div class="hidden" id="mfaRecuperacao">
+          <p class="aviso">
+            <strong>Guarde estes códigos de recuperação agora.</strong>
+            Cada um serve uma vez, se você perder o acesso ao app. Não mostramos
+            de novo.
+          </p>
+          <ul class="recuperacao" id="mfaCodigosRecuperacao"></ul>
+        </div>
+      </div>
+
+      <div class="hidden" id="mfaDesligar">
+        <p class="muted">
+          Para desligar, confirme um código. Sem essa confirmação, quem tivesse a
+          sessão aberta poderia remover o 2FA da sua conta.
+        </p>
+        <label for="mfaCodigoDesligar" class="rotulo">Código do aplicativo</label>
+        <input type="text" id="mfaCodigoDesligar" inputmode="numeric" maxlength="6"
+               autocomplete="one-time-code" placeholder="000000">
+        <div class="acoes row" style="margin-top:12px">
+          <button class="btn" id="mfaDesligarBotao">Desligar 2FA</button>
+          <button class="btn" id="mfaCancelarDesligar">Cancelar</button>
+        </div>
+        <div class="erro" id="mfaErroDesligar"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Pagamentos</h2>
+      <div id="planoPagamentos"><p class="muted">carregando…</p></div>
     </div>
   </section>
 
 </div>
 
+</div>
+
 <div id="toasts"></div>
+
+<!-- Atendimento humano (item 13): um botão flutuante que abre o chat no canto
+     da tela. O agente de suporte vê a conta de quem está logado — pode trocar
+     plano, cancelar e lembrar os pagamentos. -->
+<button class="suporte-flut" id="suporteBotao" type="button" title="Falar com o atendimento">💬</button>
+<div class="chat-js suporte-modal hidden" id="suporteModal" aria-label="Atendimento">
+  <div class="cab">
+    <span>Atendimento</span>
+    <button class="fechar" id="suporteFechar" type="button" title="Fechar">×</button>
+  </div>
+  <div class="chat-lista" id="suporteLista" aria-live="polite"></div>
+  <div class="chat-anexos" id="suporteAnexos"></div>
+  <div class="chat-entrada">
+    <textarea class="chat-campo" id="suporteCampo" rows="1"
+              placeholder="Posso ver sua conta, trocar plano, cancelar…"></textarea>
+    <button class="chat-enviar" id="suporteEnviar" type="button">Enviar</button>
+  </div>
+</div>
 
 <div class="hidden" id="gate">
   <div class="card">
@@ -111,27 +283,78 @@
   </div>
 </div>
 
-<!-- Formulário de agente. O cliente mexe só em nome e instrução: canal é
-     assunto do admin (Evolution e Instagram não-oficial exigem infraestrutura
-     da plataforma), então a escolha fica no painel admin. -->
+<!-- Checkout PIX (cobrança real): o QR code gerado pelo Mercado Pago aparece
+     aqui depois do "Pagar". O polling a cada poucos segundos confirma o
+     pagamento sem depender do webhook. -->
+<div id="pixModal" class="hidden">
+  <div class="pix-overlay"></div>
+  <div class="card pix-card" role="dialog" aria-label="Pagamento PIX">
+    <div class="row" style="justify-content:space-between; align-items:center">
+      <h2 style="margin:0">Pagamento PIX</h2>
+      <button class="btn" id="pixFechar" type="button" title="Fechar">×</button>
+    </div>
+    <p class="mem" id="pixTexto">Gerando o QR code…</p>
+    <div class="pix-qrcode-area">
+      <img id="pixQr" alt="QR code PIX" style="display:none">
+      <p class="mem" id="pixSemImagem" style="display:none"></p>
+    </div>
+    <details>
+      <summary style="cursor:pointer; font-size:13px">Copiar código PIX (copia e cola)</summary>
+      <div class="row" style="gap:8px; margin-top:8px">
+        <input id="pixCopiaCola" readonly style="flex:1; font-size:11px">
+        <button class="btn primary" id="pixCopiar" type="button">Copiar</button>
+      </div>
+    </details>
+    <p class="mem" id="pixStatus" style="margin-top:10px">Aguardando o pagamento…</p>
+    <p class="mem">O período novo só começa no fim do que você já pagou (regra da
+      tela de plano). Assim que o PIX cair, o painel atualiza sozinho.</p>
+  </div>
+</div>
+
+<!-- Formulário de agente. O cliente mexe em nome, instrução e canais. O
+     gerador de system prompt por perguntas (item 12) entra como botão ao lado
+     do campo de instrução, abrindo ao lado — não acima, para o texto já escrito
+     continuar visível enquanto ele responde. -->
 <div class="hidden" id="agenteForm">
-  <div class="card">
-    <h2 id="agenteFormTitulo">Novo agente</h2>
-    <label for="agNome">Nome</label>
-    <input type="text" id="agNome" placeholder="Atendimento, Vendas…">
-    <label for="agPrompt">Instrução (prompt)</label>
-    <textarea id="agPrompt" rows="8" placeholder="Você é o assistente da empresa X. Responda em português, seja direto…"></textarea>
-    <label class="row" style="margin-top:8px">
-      <input type="checkbox" id="agAtivo" checked style="width:auto"> Ativo
-    </label>
-    <div class="acoes row" style="margin-top:14px">
-      <button class="btn primary" id="agSalvar">Salvar</button>
-      <button class="btn" id="agCancelar">Cancelar</button>
+  <div class="agente-form-wrap">
+    <div class="card painel-conteudo">
+      <h2 id="agenteFormTitulo">Novo agente</h2>
+      <label for="agNome">Nome</label>
+      <input type="text" id="agNome" placeholder="Atendimento, Vendas…">
+      <div class="row" style="margin-top:12px">
+        <label for="agPrompt" style="margin:0">Instrução (prompt)</label>
+        <button class="btn tiny" id="agGerarPrompt" type="button"
+                title="Responde perguntas e monta o prompt para você">✨ Gerar com o assistente</button>
+      </div>
+      <textarea id="agPrompt" rows="8" placeholder="Você é o assistente da empresa X. Responda em português, seja direto…"></textarea>
+      <label class="row" style="margin-top:8px">
+        <input type="checkbox" id="agAtivo" checked style="width:auto"> Ativo
+      </label>
+      <div class="acoes row" style="margin-top:14px">
+        <button class="btn primary" id="agSalvar">Salvar</button>
+        <button class="btn" id="agCancelar">Cancelar</button>
+      </div>
+    </div>
+
+    <div class="chat-js gerador-popup hidden" id="geradorPopup" aria-label="Gerador de instrução">
+      <div class="cab">
+        <span>Gerador de instrução</span>
+        <button class="fechar" id="geradorFechar" type="button" title="Fechar">×</button>
+      </div>
+      <div class="chat-lista" id="geradorLista" aria-live="polite"></div>
+      <div class="chat-anexos" id="geradorAnexos"></div>
+      <button class="chat-botao copiar hidden" id="geradorUsar" type="button">Usar no campo de instrução</button>
+      <div class="chat-entrada">
+        <textarea class="chat-campo" id="geradorCampo" rows="1"
+                  placeholder="Ex.: um bot de vendas de pizza pelo WhatsApp…"></textarea>
+        <button class="chat-enviar" id="geradorEnviar" type="button">Enviar</button>
+      </div>
     </div>
   </div>
 </div>
 
 <script src="auth.js"></script>
+<script src="chat.js"></script>
 <script>
 (async () => {
   const $ = (id) => document.getElementById(id);
@@ -191,7 +414,7 @@
   const eu = await Auth.obterSessao();
   if (!eu) { location.replace(Auth.pagina("login") + "?redir=" + encodeURIComponent(Auth.pagina("painel"))); throw new Error("sem sessao"); }
   if (eu.eh_admin) { location.replace(Auth.pagina("admin")); throw new Error("e admin"); }
-  $("euEmail").textContent = eu.email;
+  $("euEmail").textContent = eu.nome_exibido || eu.email;
   $("btnSair").onclick = () => Auth.sair();
   Auth.esconderGate();
 
@@ -204,7 +427,8 @@
       $("t-" + b.dataset.tela).classList.add("on");
       if (b.dataset.tela === "agentes") carregarAgentes();
       if (b.dataset.tela === "conversas") preencherAgentes();
-      if (b.dataset.tela === "canais") carregarCanais();
+      if (b.dataset.tela === "canais") preencherAgentesDeCanal();
+      if (b.dataset.tela === "conta") { carregarPlano(); carregarPerfil(); }
     };
   }
 
@@ -302,6 +526,10 @@
       $("agenteForm").classList.add("hidden");
       await carregarAgentes();
       await carregarResumo();
+      // A lista de agentes é a fonte do seletor de canais: um agente novo
+      // precisa aparecer lá, senão o cliente cria o agente e não consegue
+      // ligar nada a ele sem recarregar a página.
+      await preencherAgentesDeCanal();
     } catch (e) {
       toast(e.message, "err");
     } finally {
@@ -387,24 +615,768 @@
 
   $("btnFecharSessao").onclick = () => $("cardSessao").classList.add("hidden");
 
-  // ---- canais -----------------------------------------------------------
-  async function carregarCanais() {
+  // ---- canais (item 2) ---------------------------------------------------
+  // A lista de tipos vem do SERVIDOR (/api/painel/canais/tipos), e não de uma
+  // constante aqui. Motivo prático: se o formulário do cliente pedir um campo
+  // que o `_validar_config_canal` não conhece, o salvamento falha com erro
+  // desconhecido — e ninguém descobre por quê. Com a lista no servidor, os
+  // dois lados não podem divergir.
+  let tiposCanal = [];
+  let canaisAgente = [];
+  let limitesAtuais = { pode_criar_canal: true, max_canais_por_agente: 0 };
+  let editandoCanal = null;
+
+  async function carregarTipos() {
+    if (tiposCanal.length) return;
+    const r = await api("/api/painel/canais/tipos");
+    tiposCanal = r.tipos || [];
+  }
+
+  async function carregarLimites() {
     try {
-      const lista = await api("/api/painel/canais");
-      $("canais").innerHTML = lista.length ? lista.map((c) => `
-        <div class="sessao">
-          <h3>${esc(c.nome)}</h3>
-          <p class="mem">${esc(c.tipo)} · ${c.ativo ? "ativo" : "inativo"}</p>
-        </div>`).join("")
-        : '<p class="vazio">Nenhum canal. Fale com o suporte para ativar um.</p>';
+      limitesAtuais = await api("/api/plano/limites");
+    } catch (e) {
+      limitesAtuais = { pode_criar_canal: true, max_canais_por_agente: 0 };
+    }
+  }
+
+  async function preencherAgentesDeCanal() {
+    const sel = $("selCanalAgente");
+    try {
+      const lista = await api("/api/painel/agentes");
+      if (!lista.length) {
+        sel.innerHTML = '<option value="">— sem agentes —</option>';
+        $("btnNovoCanal").disabled = true;
+        $("canais").innerHTML =
+          '<p class="vazio">Crie um agente primeiro: todo canal pertence a um agente.</p>';
+        return;
+      }
+      $("btnNovoCanal").disabled = false;
+      const atual = sel.value;
+      sel.innerHTML = lista.map((a) => `<option value="${a.id}">${esc(a.nome)}</option>`).join("");
+      if (atual && lista.some((a) => String(a.id) === String(atual))) sel.value = atual;
+      await carregarCanais();
     } catch (e) {
       $("canais").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
     }
   }
 
+  async function carregarCanais() {
+    const agenteId = $("selCanalAgente").value;
+    if (!agenteId) return;
+    await carregarLimites();
+    try {
+      const resposta = await api("/api/painel/agentes/" + agenteId + "/canais");
+      // `api()` devolve o JSON cru. Se a rota vier com outra coisa (proxy
+      // engasgado devolvendo `{}`, migração no meio, rota antiga em cache),
+      // usar isso como lista produziria "undefined de 4 canais" na tela -- e um
+      // contador mentindo é pior do que uma lista vazia com aviso.
+      if (!Array.isArray(resposta)) {
+        canaisAgente = [];
+        $("usoCanais").textContent = "—";
+        $("canais").innerHTML = '<p class="aviso">A lista de canais veio em formato inesperado '
+          + "do servidor. Recarregue a página.</p>";
+        return;
+      }
+      canaisAgente = resposta;
+    } catch (e) {
+      $("canais").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+      return;
+    }
+
+    const limite = limitesAtuais.max_canais_por_agente || 0;
+    const cheio = limite > 0 && canaisAgente.length >= limite;
+    $("usoCanais").textContent = limite
+      ? `${canaisAgente.length} de ${limite} canais neste agente`
+      : `${canaisAgente.length} canal(is)`;
+    // Botão desabilitado em vez de deixar o clique falhar com 402: erro de
+    // cota mostrada depois do clique é pior do que botão cinza com o motivo
+    // escrito ao lado.
+    $("btnNovoCanal").disabled = cheio;
+    $("btnNovoCanal").title = cheio
+      ? `Seu plano permite ${limite} canal(is) por agente. Mude de plano na aba Conta.`
+      : "";
+
+    $("canais").innerHTML = canaisAgente.length ? canaisAgente.map((c) => `
+      <div class="sessao">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h3>${esc(c.nome)}</h3>
+            <p class="mem">${esc(c.tipo)}${c.tipo.endsWith("_oficial") ? " · oficial da Meta" : ""}
+              · ${c.ativo ? "ativo" : "pausado"}</p>
+          </div>
+          <div class="canal-acoes">
+            <button class="btn sm" data-editar-canal="${c.id}">Editar</button>
+            <button class="btn sm" data-excluir-canal="${c.id}">Excluir</button>
+          </div>
+        </div>
+        ${c.tipo === "telegram" ? '<button class="btn sm" style="margin-top:8px" data-webhook-tg="' + c.id + '">Registrar webhook</button>' : ""}
+        ${c.tipo === "webhook" ? '<p class="mem mono" style="margin-top:8px;word-break:break-all">URL após salvar</p>' : ""}
+      </div>`).join("")
+      : '<p class="vazio">Este agente ainda não tem canal. Crie o primeiro com o botão acima.</p>';
+
+    for (const b of $("canais").querySelectorAll("[data-editar-canal]")) {
+      b.onclick = () => abrirFormCanal(
+        canaisAgente.find((c) => String(c.id) === b.dataset.editarCanal));
+    }
+    for (const b of $("canais").querySelectorAll("[data-excluir-canal]")) {
+      b.onclick = () => excluirCanal(b.dataset.excluirCanal);
+    }
+    for (const b of $("canais").querySelectorAll("[data-webhook-tg]")) {
+      b.onclick = () => registrarWebhook(b.dataset.webhookTg);
+    }
+  }
+
+  $("selCanalAgente").onchange = () => { $("canalForm").classList.add("hidden"); carregarCanais(); };
+
+  $("btnNovoCanal").onclick = async () => {
+    if (cheio()) return;
+    const form = $("canalForm");
+    if (!form.classList.contains("hidden")) { form.classList.add("hidden"); return; }
+    await carregarTipos();
+    await mostrarFormCanal(null);
+  };
+
+  function cheio() {
+    const limite = limitesAtuais.max_canais_por_agente || 0;
+    if (limite > 0 && canaisAgente.length >= limite) {
+      toast(`Seu plano permite ${limite} canal(is) por agente. Mude de plano na aba Conta.`, "err");
+      return true;
+    }
+    return false;
+  }
+
+  function camposCanal(tipo, config = {}, novo = false) {
+    const v = (x) => (novo ? "" : esc(x || ""));
+    const campos = (tiposCanal.find((t) => t.id === tipo) || {}).campos || [];
+    if (!campos.length) {
+      return '<p class="muted">Nenhuma credencial é necessária. Salve e a URL aparece no canal.</p>';
+    }
+    return campos.map((c) => `
+      <label>${esc(c.rotulo)}${c.obrigatorio ? " *" : ""}</label>
+      <input type="${c.tipo === "password" ? "password" : "text"}" data-config="${esc(c.chave)}"
+        value="${v(config[c.chave])}" placeholder="${novo ? esc(c.placeholder) : "deixe em branco para manter"}">
+      ${c.ajuda ? `<p class="muted" style="margin-top:4px">${esc(c.ajuda)}</p>` : ""}
+    `).join("");
+  }
+
+  function passoAPasso(tipo) {
+    const t = tiposCanal.find((x) => x.id === tipo) || {};
+    if (!t.como_usar || !t.como_usar.length) return "";
+    return `<p class="muted" style="margin-top:10px"><strong>Passo a passo</strong></p>
+      <ol class="muted" style="margin:4px 0 0 18px">${t.como_usar.map((p) => `<li>${p}</li>`).join("")}</ol>`;
+  }
+
+  function coletarConfig(raiz) {
+    const config = {};
+    raiz.querySelectorAll("[data-config]").forEach((i) => {
+      config[i.dataset.config] = i.value.trim();
+    });
+    return config;
+  }
+
+  async function mostrarFormCanal(canal) {
+    await carregarTipos();
+    editandoCanal = canal || null;
+    const form = $("canalForm");
+    const selTipo = canal
+      ? `<label>Tipo</label><input type="text" value="${esc(canal.tipo)}" disabled>`
+      : `<label>Tipo de canal</label>
+         <select id="cTipo">${tiposCanal.map((t) => `<option value="${esc(t.id)}">${esc(t.nome)}</option>`).join("")}</select>`;
+    form.innerHTML = `
+      <div class="card" style="background:var(--panel-2);margin:0">
+        <h2>${canal ? "Editar canal" : "Novo canal"}</h2>
+        ${selTipo}
+        <label>Nome do canal</label>
+        <input type="text" id="cNome" value="${esc(canal ? canal.nome : "")}" placeholder="Ex.: WhatsApp do suporte">
+        <div id="cCampos">${camposCanal(canal ? canal.tipo : tiposCanal[0]?.id, canal ? canal.config : {}, !canal)}</div>
+        <label>Ativo</label>
+        <select id="cAtivo">
+          <option value="true">Sim</option><option value="false">Não</option>
+        </select>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" id="cSalvar">Salvar canal</button>
+          <button class="btn" id="cCancelar">Cancelar</button>
+        </div>
+      </div>`;
+    form.classList.remove("hidden");
+    $("cAtivo").value = String(canal ? canal.ativo : true);
+    $("cCancelar").onclick = () => form.classList.add("hidden");
+    if (!canal) {
+      $("cTipo").onchange = () => {
+        $("cCampos").innerHTML = camposCanal($("cTipo").value, {}, true)
+          + passoAPasso($("cTipo").value);
+      };
+      $("cCampos").innerHTML = camposCanal(tiposCanal[0]?.id, {}, true)
+        + passoAPasso(tiposCanal[0]?.id);
+    }
+    $("cSalvar").onclick = (ev) => salvarCanal(ev.currentTarget);
+  }
+
+  async function salvarCanal(btn) {
+    const form = $("canalForm");
+    const nome = $("cNome").value.trim();
+    if (!nome) { toast("Informe um nome para o canal.", "err"); return; }
+    const ativo = $("cAtivo").value === "true";
+    const config = coletarConfig(form);
+    if (editandoCanal) {
+      const tipo = tiposCanal.find((t) => t.id === editandoCanal.tipo);
+      for (const campo of (tipo ? tipo.campos : [])) {
+        if (campo.obrigatorio && !config[campo.chave] && editandoCanal.config[campo.chave] === "********") {
+          toast(`Preencha ${campo.rotulo}: o valor guardado não volta para o navegador, por segurança.`, "err");
+          return;
+        }
+      }
+    } else {
+      const tipo = $("cTipo").value;
+      const def = tiposCanal.find((t) => t.id === tipo);
+      for (const campo of (def ? def.campos : [])) {
+        if (campo.obrigatorio && !config[campo.chave]) {
+          toast(`Informe ${campo.rotulo}.`, "err");
+          return;
+        }
+      }
+    }
+    btn.disabled = true;
+    try {
+      if (editandoCanal) {
+        await api("/api/canais/" + editandoCanal.id, {
+          method: "PUT", body: JSON.stringify({ nome, config, ativo }),
+        });
+        toast("Canal atualizado.");
+      } else {
+        if (cheio()) { btn.disabled = false; return; }
+        const criado = await api("/api/agentes/" + $("selCanalAgente").value + "/canais", {
+          method: "POST",
+          body: JSON.stringify({ tipo: $("cTipo").value, nome, config }),
+        });
+        toast("Canal criado.");
+        // O passo que quase todo mundo esquece: sem registrar o webhook, o
+        // canal existe e não recebe nada. Avisar aqui evita o "criei e não
+        // funciona".
+        const def = tiposCanal.find((t) => t.id === $("cTipo").value);
+        if (def && def.depois_de_salvar) toast(def.depois_de_salvar);
+        if (criado && criado.config && criado.config.secret) {
+          $("urlCanalCriado").innerHTML = urlDoCanal(criado);
+        }
+      }
+      form.classList.add("hidden");
+      await carregarCanais();
+      await carregarResumo();
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function urlDoCanal(c) {
+    const base = Auth.API_BASE.replace(/\/api$/, "");
+    const fam = { telegram: "telegram", whatsapp_oficial: "meta/whatsapp",
+                  instagram_oficial: "meta/instagram", webhook: "generico" }[c.tipo];
+    if (!fam || !c.config || !c.config.secret) return "";
+    return `${base}/webhook/${fam}/${c.id}/${c.config.secret}`;
+  }
+
+  async function registrarWebhook(canalId) {
+    try {
+      const r = await api("/api/canais/" + canalId + "/telegram/set-webhook", { method: "POST" });
+      toast("Webhook registrado. O canal já recebe mensagens.", "ok");
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  async function excluirCanal(id) {
+    const c = canaisAgente.find((x) => String(x.id) === String(id));
+    if (!confirm('Excluir o canal "' + (c ? c.nome : id) + '"? O agente continua existindo, e as conversas dele também.')) return;
+    try {
+      await api("/api/canais/" + id, { method: "DELETE" });
+      toast("Canal excluído.");
+      await carregarCanais();
+      await carregarResumo();
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  // ---- conta / plano (item 9) --------------------------------------------
+  const reais = (v) => "R$ " + Number(v || 0).toLocaleString("pt-BR",
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const inteiro = (v) => Number(v || 0).toLocaleString("pt-BR");
+
+  async function carregarPlano() {
+    try {
+      const p = await api("/api/plano");
+      const pl = p.plano || {};
+      $("planoAtual").innerHTML = `
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <h3 style="margin:0">${esc(pl.nome || "—")}</h3>
+            <p class="mem">
+              ${p.em_teste
+                ? "Teste grátis"
+                : (p.ciclo === "anual" ? "Pagamento anual" : "Pagamento mensal")}
+              · ${p.status === "expirado" ? "período encerrado" : "ativo"}
+              ${p.dias_restantes != null && p.status !== "expirado"
+                ? " · " + p.dias_restantes + " dia(s) até o fim do período" : ""}
+            </p>
+          </div>
+          <div style="text-align:right">
+            <div class="preco">${reais(pl.preco_mensal)}<small>/mês</small></div>
+            <p class="mem">anual: ${reais(pl.preco_anual)} (economiza ${reais(p.economia_anual)})</p>
+          </div>
+        </div>
+        ${p.troca_agendada ? `<div class="aviso-ok" style="margin-top:10px">
+          Você pediu o plano <strong>${esc(p.troca_agendada.plano.nome)}</strong>
+          (${p.troca_agendada.ciclo === "anual" ? "anual" : "mensal"}).
+          Ele entra em ${new Date(p.troca_agendada.entra_em).toLocaleDateString("pt-BR")},
+          no fim do período já pago.
+          <div class="row" style="margin-top:8px">
+            <button class="btn sm" id="btnDesfazerTroca">Desfazer</button>
+          </div>
+        </div>` : ""}
+        ${p.cancelamento_agendado ? `<div class="aviso" style="margin-top:10px">
+          Seu plano termina em ${new Date(p.cancelamento_agendado).toLocaleDateString("pt-BR")}.
+          Seus agentes e canais continuam guardados.
+          <div class="row" style="margin-top:8px">
+            <button class="btn sm" id="btnReativar">Reativar</button>
+          </div>
+        </div>` : ""}
+        <p class="mem" style="margin-top:10px">
+          Inclui ${inteiro(pl.max_agentes)} agente(s),
+          ${inteiro(pl.max_canais_por_agente)} canal(is) por agente e
+          ${inteiro(pl.max_mensagens_por_agente_mes)} mensagens por agente por mês
+          (${reais(pl.preco_por_mil_mensagens)} por mil).
+        </p>`;
+
+      if ($("btnDesfazerTroca")) {
+        $("btnDesfazerTroca").onclick = async () => {
+          try {
+            await api("/api/plano/troca/cancelar", { method: "POST" });
+            toast("Troca desfeita.", "ok");
+            await carregarPlano();
+          } catch (e) { toast(e.message, "err"); }
+        };
+      }
+      if ($("btnReativar")) {
+        $("btnReativar").onclick = async () => {
+          try {
+            await api("/api/plano/reativar", { method: "POST" });
+            toast("Assinatura reativada.", "ok");
+            await carregarPlano();
+          } catch (e) { toast(e.message, "err"); }
+        };
+      }
+
+      $("planoUso").innerHTML = (p.consumo || []).length
+        ? p.consumo.map((c) => {
+            const pct = c.limite ? Math.min(100, Math.round(c.mensagens / c.limite * 100)) : 0;
+            return `<div class="uso">
+              <div class="row" style="justify-content:space-between">
+                <strong>Agente #${c.agente_id}</strong>
+                <span class="mem">${inteiro(c.mensagens)} / ${inteiro(c.limite)}</span>
+              </div>
+              <div class="barra"><i class="${c.excedeu ? "estouro" : ""}" style="width:${pct}%"></i></div>
+              ${c.excedeu ? '<p class="mem" style="margin-top:6px">Limite do mês atingido. O bot avisa quem escreve e o dono pode aumentar o plano.</p>' : ""}
+            </div>`;
+          }).join("")
+        : '<p class="vazio">Nenhuma mensagem neste mês ainda.</p>';
+
+      $("planoGrade").innerHTML = (p.catalogo || []).map((pl2) => `
+        <div class="plano ${pl2.id === pl.id ? "atual" : ""}">
+          ${pl2.destaque ? '<span class="tag">Mais escolhido</span>' : ""}
+          <h3>${esc(pl2.nome)}</h3>
+          <div class="preco">${reais(pl2.preco_mensal)}<small>/mês</small></div>
+          <p class="mem">${reais(pl2.preco_anual)} no ano · economiza ${reais(pl2.desconto_anual)}</p>
+          <ul>
+            <li>${inteiro(pl2.max_agentes)} agente(s)</li>
+            <li>${inteiro(pl2.max_canais_por_agente)} canal(is) por agente</li>
+            <li>${inteiro(pl2.max_mensagens_por_agente_mes)} mensagens/agente/mês</li>
+            <li>${reais(pl2.preco_por_mil_mensagens)} por mil mensagens</li>
+          </ul>
+          ${pl2.sem && pl2.sem.length ? `<p class="mem">${pl2.sem.map(esc).join("<br>")}</p>` : ""}
+          <div class="row" style="margin-top:auto">
+            <button class="btn sm" data-assinar-m="${esc(pl2.id)}" data-ciclo="mensal">Mensal</button>
+            <button class="btn sm primary" data-assinar-a="${esc(pl2.id)}" data-ciclo="anual">Anual</button>
+          </div>
+        </div>`).join("");
+
+      for (const b of $("planoGrade").querySelectorAll("[data-assinar-m], [data-assinar-a]")) {
+        b.onclick = () => pedirTroca(b.dataset.assinarM || b.dataset.assinarA, b.dataset.ciclo);
+      }
+
+      if (p.status === "expirado" || p.status === "cancelado") {
+        $("planoAviso").innerHTML = `<div class="aviso" style="margin-top:12px">
+          O período do seu plano acabou, então novos agentes e novos canais estão
+          barrados. O que você já tinha continua guardado e volta a funcionar
+          assim que a assinatura voltar.
+        </div>`;
+      } else {
+        $("planoAviso").innerHTML = "";
+      }
+
+      await carregarPagamentos();
+    } catch (e) {
+      $("planoAtual").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  async function pedirTroca(planoId, ciclo) {
+    try {
+      const r = await api("/api/plano/troca", {
+        method: "POST", body: JSON.stringify({ plano: planoId, ciclo }),
+      });
+      const trocou = r.troca_agendada;
+      toast(trocou
+        ? `Pedido registrado: o plano ${trocou.plano.nome} entra em ${new Date(trocou.entra_em).toLocaleDateString("pt-BR")}.`
+        : "Pedido registrado.", "ok");
+      await carregarPlano();
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  async function carregarPagamentos() {
+    try {
+      const lista = await api("/api/plano/pagamentos");
+      $("planoPagamentos").innerHTML = lista.length ? lista.map((p) => {
+        const nomePlano = (p.plano_id || "").toUpperCase();
+        const quando = new Date(p.criado_em).toLocaleDateString("pt-BR");
+        if (p.status === "pago") {
+          return `<div class="sessao">
+            <div class="row" style="justify-content:space-between">
+              <div><h3>${esc(nomePlano)} · ${p.ciclo === "anual" ? "anual" : "mensal"}</h3>
+              <p class="mem">${quando} · pago</p></div>
+              <strong>${reais(p.valor)}</strong>
+            </div>
+          </div>`;
+        }
+        return `<div class="sessao">
+          <div class="row" style="justify-content:space-between">
+            <div><h3>${esc(nomePlano)} · ${p.ciclo === "anual" ? "anual" : "mensal"}</h3>
+              <p class="mem">${quando} · aguardando pagamento</p></div>
+            <div class="canal-acoes">
+              <strong>${reais(p.valor)}</strong>
+              <button class="btn sm primary" data-pagar="${p.id}">${p.referencia ? "Ver PIX" : "Pagar"}</button>
+            </div>
+          </div>
+        </div>`;
+      }).join("") : '<p class="vazio">Nenhum pagamento ainda.</p>';
+
+      for (const b of $("planoPagamentos").querySelectorAll("[data-pagar]")) {
+        b.onclick = () => pagar(b.dataset.pagar);
+      }
+    } catch (e) {
+      $("planoPagamentos").innerHTML = '<p class="aviso">Erro: ' + esc(e.message) + "</p>";
+    }
+  }
+
+  async function pagar(id) {
+    try {
+      const r = await api("/api/plano/pagamento/" + id + "/checkout", { method: "POST" });
+      if (r && r.isento) {
+        toast("Conta isenta: o plano foi ativado sem cobrança.", "ok");
+        await carregarPlano();
+        await carregarLimites();
+        return;
+      }
+      if (!r || r.qr_code === undefined) {
+        // Já pago ou cancelado: o checkout devolveu o contexto inteiro.
+        await carregarPlano();
+        await carregarLimites();
+        return;
+      }
+      abrirPix(id, r);
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  let pixTimer = null;
+
+  function abrirPix(id, dados) {
+    const modal = $("pixModal");
+    modal.classList.remove("hidden");
+    const qr = dados.qr_code_base64 || "";
+    $("pixQr").src = qr ? "data:image/png;base64," + qr : "";
+    $("pixQr").style.display = qr ? "" : "none";
+    $("pixSemImagem").style.display = qr ? "none" : "";
+    $("pixSemImagem").textContent = "Use o código PIX abaixo para pagar.";
+    $("pixCopiaCola").value = dados.qr_code || "";
+    const rotulo = dados.plano ? dados.plano.nome + " · " : "";
+    $("pixTexto").textContent = dados.valor ? `${rotulo}${reais(dados.valor)}` : "Pague com PIX.";
+    $("pixStatus").textContent = "Aguardando o pagamento…";
+    if (dados.expira_em) {
+      const ate = new Date(dados.expira_em);
+      $("pixStatus").textContent = "QR válido até " + ate.toLocaleTimeString("pt-BR") + " — aguardando o pagamento…";
+    }
+    if (pixTimer) clearInterval(pixTimer);
+    pixTimer = setInterval(async () => {
+      try {
+        const s = await api("/api/plano/pagamento/" + id);
+        if (s.status === "pago") {
+          clearInterval(pixTimer);
+          pixTimer = null;
+          modal.classList.add("hidden");
+          toast("PIX recebido! Seu plano foi atualizado.", "ok");
+          await carregarPlano();
+          await carregarLimites();
+        } else if (s.status !== "pendente") {
+          clearInterval(pixTimer);
+          pixTimer = null;
+        }
+      } catch (e) { /* mantém o modal aberto; o próximo tick tenta de novo */ }
+    }, 6000);
+  }
+
+  $("pixFechar").onclick = () => {
+    if (pixTimer) clearInterval(pixTimer);
+    pixTimer = null;
+    $("pixModal").classList.add("hidden");
+  };
+  $("pixCopiar").onclick = () => {
+    const t = $("pixCopiaCola");
+    t.select();
+    t.setSelectionRange(0, t.value.length);
+    if (navigator.clipboard) navigator.clipboard.writeText(t.value).catch(() => {});
+    else document.execCommand("copy");
+    toast("Código PIX copiado.", "ok");
+  };
+
+  async function carregarPerfil() {
+    try {
+      const p = await api("/api/painel/perfil");
+      $("perfilNome").value = p.nome || "";
+      $("perfilEmail").value = p.email || "";
+      eu.mfa_ativo = !!p.mfa_ativo;
+      pintarMfa(eu.mfa_ativo);
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  $("perfilSalvar").onclick = async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    try {
+      const nome = $("perfilNome").value.trim();
+      await api("/api/painel/perfil", { method: "PUT", body: JSON.stringify({ nome }) });
+      toast("Dados salvos.", "ok");
+      eu.nome = nome;
+      $("euEmail").textContent = nome || eu.email;
+      await carregarPerfil();
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  /* ---- segurança: verificação em duas etapas (item 5) ------------------
+     O estado vem de /api/painel/perfil (nosso banco) e o que pode ser feito
+     com ele, do GoTrue. São duas fontes porque cada uma sabe de uma coisa só:
+     o banco sabe se ESTA aplicação exige o fator, o GoTrue sabe se o fator
+     existe e se o código é válido. */
+  let fatorMfa = null;        // fator inscrito no GoTrue, ainda não confirmado
+  let desafioMfa = null;      // desafio de código em aberto
+
+  function mostrarRecuperacao(codigos) {
+    $("mfaRecuperacao").classList.remove("hidden");
+    $("mfaCodigosRecuperacao").innerHTML = codigos
+      .map((c) => `<li>${esc(c)}</li>`).join("");
+  }
+
+  function pintarMfa(mfaAtivo) {
+    $("mfaAtivar").classList.add("hidden");
+    $("mfaDesligar").classList.add("hidden");
+    $("mfaRecuperacao").classList.add("hidden");
+    $("mfaErro").textContent = "";
+    $("mfaErroDesligar").textContent = "";
+
+    $("mfaEstado").innerHTML = mfaAtivo
+      ? `<p><span class="badge">Ativa</span> A cada entrada pedimos um código do seu
+         aplicativo autenticador.</p>
+         <p class="muted">Se perder o celular, use um dos códigos de recuperação que
+         você guardou — cada um serve uma vez.</p>
+         <div class="acoes row"><button class="btn" id="mfaBotaoDesligar">
+         Desligar 2FA</button></div>`
+      : `<p><span class="badge">Desligada</span> Sua conta está protegida só pela
+         senha.</p>
+         <p class="muted">Ligar o 2FA impede que alguém entre com a sua senha
+         sozinha. Leva dois minutos.</p>
+         <div class="acoes row"><button class="btn primary" id="mfaBotaoAtivar">
+         Ativar 2FA</button></div>`;
+
+    const ativar = $("mfaBotaoAtivar");
+    if (ativar) ativar.onclick = () => abrirInscricao();
+    const desligar = $("mfaBotaoDesligar");
+    if (desligar) desligar.onclick = () => $("mfaDesligar").classList.remove("hidden");
+  }
+
+  async function abrirInscricao() {
+    $("mfaErro").textContent = "Preparando o QR code…";
+    $("mfaEstado").innerHTML = "<p class='muted'>Preparando o QR code…</p>";
+    try {
+      fatorMfa = await Auth.inscreverFator(localStorage.getItem("chatbotproject.usuario"),
+                                          "Chatbot Project");
+      $("mfaQr").src = (fatorMfa.totp && fatorMfa.totp.qr_code) || "";
+      $("mfaQr").style.display = $("mfaQr").src ? "" : "none";
+      $("mfaSegredo").textContent = (fatorMfa.totp && fatorMfa.totp.secret) || "";
+      $("mfaAtivar").classList.remove("hidden");
+      $("mfaErro").textContent = "";
+      $("mfaCodigo").focus();
+    } catch (e) {
+      fatorMfa = null;
+      pintarMfa(eu.mfa_ativo);
+      toast(e.message, "err");
+    }
+  }
+
+  $("mfaCancelar").onclick = () => {
+    // Cancelar a inscrição DEPOIS de criar o fator deixaria um fator órfão
+    // (inscrito, nunca confirmado). Ele não exige código para entrar, então não
+    // atrapalharia — mas ocupa a cota de fatores e aparece na lista de
+    // métodos do GoTrue. Por isso apagar é o cancelamento de verdade.
+    const id = fatorMfa && fatorMfa.id;
+    fatorMfa = null;
+    $("mfaAtivar").classList.add("hidden");
+    if (id) Auth.removerFator(localStorage.getItem("chatbotproject.usuario"), id).catch(() => {});
+    pintarMfa(eu.mfa_ativo);
+  };
+
+  $("mfaCancelarDesligar").onclick = () => $("mfaDesligar").classList.add("hidden");
+
+  $("mfaConfirmar").onclick = async () => {
+    if (!fatorMfa) { $("mfaErro").textContent = "Gere o QR primeiro."; return; }
+    const btn = $("mfaConfirmar");
+    btn.disabled = true;
+    $("mfaErro").textContent = "Conferindo…";
+    try {
+      const token = localStorage.getItem("chatbotproject.usuario");
+      const r = await Auth.confirmarFator(token, fatorMfa.id, null, $("mfaCodigo").value);
+      $("mfaCodigo").value = "";
+      // Agora o token é aal2. É com ele que o servidor aceita marcar mfa_ativo:
+      // a prova de posse do celular é o próprio token, sem segredo compartilhado.
+      await api("/api/painel/mfa", { method: "PUT", body: JSON.stringify({ ativo: true }) });
+      eu.mfa_ativo = true;
+      fatorMfa = null;
+      pintarMfa(true);
+      if (r.recovery_codes && r.recovery_codes.length) {
+        mostrarRecuperacao(r.recovery_codes);
+      } else {
+        toast("Verificação em duas etapas ativada.", "ok");
+      }
+    } catch (e) {
+      $("mfaErro").textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  $("mfaDesligarBotao").onclick = async () => {
+    const btn = $("mfaDesligarBotao");
+    btn.disabled = true;
+    $("mfaErroDesligar").textContent = "Conferindo…";
+    try {
+      const token = localStorage.getItem("chatbotproject.usuario");
+      const lista = await Auth.fatores(token);
+      const alvo = lista.filter((f) => f.status !== "unverified")[0];
+      if (!alvo) throw new Error("Nenhum autenticador ativo foi encontrado na conta.");
+      // Um desafio novo a cada tentativa, para que um código já usado não passe
+      // e para que o servidor possa invalidar os antigos.
+      const d = await Auth.desafiarFator(token, alvo.id);
+      await Auth.confirmarFator(token, alvo.id, d.id, $("mfaCodigoDesligar").value);
+      await Auth.removerFator(token, alvo.id);
+      await api("/api/painel/mfa", { method: "PUT", body: JSON.stringify({ ativo: false }) });
+      $("mfaCodigoDesligar").value = "";
+      eu.mfa_ativo = false;
+      pintarMfa(false);
+      toast("Verificação em duas etapas desligada.", "ok");
+    } catch (e) {
+      $("mfaErroDesligar").textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
   await carregarResumo();
   carregarAgentes();
+  preencherAgentesDeCanal();
   setInterval(carregarResumo, 30000);
+
+  // ---- chats internos --------------------------------------------------
+  // Gerador de prompt (item 12): abre ao lado do campo de instrução, para o
+  // texto já escrito no prompt continuar visível enquanto o gerador responde.
+  const abrirGerador = () => $("geradorPopup").classList.remove("hidden");
+  const fecharGerador = () => $("geradorPopup").classList.add("hidden");
+  $("agGerarPrompt").onclick = () => { abrirGerador(); $("geradorCampo").focus(); };
+  $("geradorFechar").onclick = fecharGerador;
+
+  let geradorChat = null;
+  if ($("geradorPopup")) {
+    geradorChat = Chat.iniciar({
+      chave: "prompt",
+      lista: "geradorLista",
+      campo: "geradorCampo",
+      enviar: "geradorEnviar",
+      chips: "geradorAnexos",
+      comHistorico: true,
+      aoPromptGerado: () => $("geradorUsar").classList.remove("hidden"),
+    });
+    $("geradorUsar").onclick = () => {
+      if (!geradorChat || !geradorChat.ultimoPrompt) return;
+      $("agPrompt").value = geradorChat.ultimoPrompt;
+      $("agPrompt").focus();
+      toast("Instrução preenchida com o prompt gerado.", "ok");
+      fecharGerador();
+    };
+  }
+
+  // Suporte (item 13): botão flutuante que abre o atendimento no canto. O
+  // agente vê a conta de quem está logado; os botões abaixo das respostas são
+  // atalhos — os dados sensíveis (pagamentos, plano) moram na aba Conta.
+  const abrirSuporte = () => {
+    $("suporteModal").classList.remove("hidden");
+    $("suporteBotao").classList.add("hidden");
+  };
+  const fecharSuporte = () => {
+    $("suporteModal").classList.add("hidden");
+    $("suporteBotao").classList.remove("hidden");
+  };
+  $("suporteBotao").onclick = abrirSuporte;
+  $("suporteFechar").onclick = fecharSuporte;
+
+  Chat.iniciar({
+    chave: "suporte",
+    lista: "suporteLista",
+    campo: "suporteCampo",
+    enviar: "suporteEnviar",
+    chips: "suporteAnexos",
+    comHistorico: true,
+    aoAcao: (acao, lista) => {
+      if (acao.nome === "mudar_plano" && acao.dados && !acao.dados.erro) {
+        const b = document.createElement("button");
+        b.className = "chat-botao ghost";
+        b.type = "button";
+        b.textContent = "Ver meus pagamentos";
+        b.onclick = () => {
+          fecharSuporte();
+          const nav = document.querySelector('[data-tela="conta"]');
+          if (nav) nav.click();
+        };
+        lista.appendChild(b);
+      }
+      if (acao.nome === "falar_com_time" && acao.dados
+          && /\S+@\S+\.\S+/.test(acao.dados.email || "")) {
+        const a = document.createElement("a");
+        a.className = "chat-botao ghost";
+        a.href = "mailto:" + acao.dados.email;
+        a.textContent = "Escrever para " + acao.dados.email;
+        lista.appendChild(a);
+      }
+    },
+  });
 })();
 </script>
 </body>

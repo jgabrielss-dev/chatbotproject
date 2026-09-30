@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+.pytest_cache/
 *.pyc
 .env
 # Qualquer .env, nao so o da raiz: um .env.local ou .env.production com senha
@@ -21,5 +22,9 @@ supabase/.temp/
 *.tmp
 *.orig
 *.rej
+
+# Contexto de sessao (o que aconteceu, pendencias, armadilhas). Fica na raiz
+# por preferencia, mas nao sobe: tem caminhos de pasta e detalhes de ambiente.
+agents.txt
 .DS_Store
 Thumbs.db

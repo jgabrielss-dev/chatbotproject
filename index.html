@@ -15,8 +15,10 @@
   .topo { display: flex; align-items: center; justify-content: space-between;
           gap: 16px; padding: 8px 0 30px; }
   .marca { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
+  /* accent é preto no claro e branco no escuro: quem escreve por cima dele usa
+     --on-accent, senão o texto some em um dos dois temas. */
   .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--accent);
-          color: #fff; display: grid; place-items: center; font-size: 15px; }
+          color: var(--on-accent); display: grid; place-items: center; font-size: 15px; }
 
   .hero h1 { font-size: 38px; line-height: 1.15; margin: 0 0 14px; letter-spacing: -.02em; }
   .hero p.lead { font-size: 17px; color: var(--muted); margin: 0 0 26px; max-width: 620px; }
@@ -36,9 +38,17 @@
   .como h2 { font-size: 20px; margin: 0 0 18px; }
   .passos { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 20px; }
   .passo .n { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
-              background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; margin-bottom: 9px; }
+              background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 600; margin-bottom: 9px; }
   .passo h3 { margin: 0 0 5px; font-size: 14px; }
   .passo p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+  /* O atendente da home (item 7): conversa, vê os planos reais e cria a conta.
+     A caixa usa as classes de chat do style.css: só posiciono aqui. */
+  .demo-chat { margin: 52px 0 0; border-top: 1px solid var(--border); padding-top: 30px; }
+  .demo-chat h2 { font-size: 20px; margin: 0 0 6px; }
+  .demo-chat .lead { font-size: 14px; color: var(--muted); margin: 0 0 14px; max-width: 620px; line-height: 1.5; }
+  #homeChat .chat-lista { min-height: 270px; max-height: 400px; }
+  .demo-chat .limite { font-size: 12px; color: var(--muted); margin-top: 8px; }
 
   .rodape { margin: 56px 0 0; padding-top: 22px; border-top: 1px solid var(--border);
             display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
@@ -114,6 +124,31 @@
     </div>
   </section>
 
+  <section class="demo-chat" id="atendente">
+    <h2>Pergunte ao nosso atendente</h2>
+    <p class="lead">
+      Mais rápido do que ler o site: ele conhece os planos, os limites e o tempo
+      de teste, e cria a sua conta na hora. Ele também lê fotos, áudios, vídeos e
+      arquivos que você mandar.
+    </p>
+    <div class="chat-js" id="homeChat">
+      <div class="chat-lista" id="homeLista" aria-live="polite"></div>
+      <div class="chat-anexos" id="homeAnexos"></div>
+      <div class="chat-entrada">
+        <button class="chat-anexar" id="homeAnexar"
+                title="Enviar foto, áudio, vídeo ou arquivo">📎</button>
+        <textarea class="chat-campo" id="homeCampo" rows="1"
+                  placeholder="Qual plano me cabe? Quero criar minha conta…"></textarea>
+        <button class="chat-enviar" id="homeEnviar">Enviar</button>
+      </div>
+    </div>
+    <input type="file" id="homeArquivo" multiple hidden>
+    <p class="limite">
+      O atendente da home responde até 12 mensagens por conversa. Criar sua
+      conta é grátis e te dá os seus próprios agentes.
+    </p>
+  </section>
+
   <footer class="rodape">
     <span>Chatbot Project</span>
     <span><a href="login.html">Entrar</a> · <a href="login.html">Criar conta</a></span>
@@ -122,6 +157,7 @@
 </div>
 
 <script src="auth.js"></script>
+<script src="chat.js"></script>
 <script>
   // Quem já tem sessão não deveria ver a página de venda: vai direto para o
   // painel que o papel permite. Sem sessão, fica aqui — é só um GET em
@@ -130,6 +166,31 @@
     if (eu) location.replace(Auth.destino(eu));
   }).catch(function () {
     // Falhou em validar a sessão (servidor acordando, rede): fica na home.
+  });
+
+  // O atendente da home (item 7). Ele pode devolver a ação "criar_conta": o
+  // botão aparece embaixo da resposta e aponta para o login com o caminho
+  // relativo que o auth.js resolve em cada host (item 4).
+  Chat.iniciar({
+    chave: "produto",
+    lista: "homeLista",
+    campo: "homeCampo",
+    enviar: "homeEnviar",
+    arquivo: "homeArquivo",
+    botaoAnexar: "homeAnexar",
+    chips: "homeAnexos",
+    comHistorico: true,
+    aoAcao: function (acao, lista) {
+      if (acao.nome === "criar_conta" && acao.dados && acao.dados.link) {
+        var a = document.createElement("a");
+        a.className = "chat-botao";
+        a.href = Auth.pagina("login");
+        a.textContent = acao.dados.plano_sugerido_nome
+          ? "Criar conta grátis (" + acao.dados.plano_sugerido_nome + ")"
+          : "Criar conta grátis";
+        lista.appendChild(a);
+      }
+    }
   });
 </script>
 </body>

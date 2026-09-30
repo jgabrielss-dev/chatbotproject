@@ -163,3 +163,66 @@ def extrair_mensagem(payload: dict) -> tuple[str | str | None, str | None, dict 
     if remote:
         remote = str(remote).split("@")[0]
     return texto, remote, data
+
+
+# --------------------------------------------------------------------------
+# Anexos (item 15)
+# --------------------------------------------------------------------------
+
+#: Chave de cada tipo no corpo da Evolution -> tipo do item 15. A Evolution
+#: manda `stickerMessage` e `contactMessage` também; os dois caem em `arquivo`
+#: (o sticker chega como webp) e o contato é texto, tratado antes daqui.
+_CAMPO_EVOLUTION = (
+    ("imageMessage", "foto"),
+    ("audioMessage", "audio"),
+    ("videoMessage", "video"),
+    ("documentMessage", "arquivo"),
+    ("stickerMessage", "foto"),
+)
+
+
+def extrair_anexo(dados: dict) -> dict | None:
+    """Referência do anexo de um MESSAGES_UPSERT, ou None se é só texto.
+
+    A Evolution pode mandar o arquivo de duas formas, e as duas continuam
+    válidas: `mediaUrl` (link público, o padrão) e `base64`/`media` (a
+    configuração `ALLOW_BASE64`/`BASE64_MEDIA` do Baileys). A segunda é
+    guardada inteira no `payload_json` de qualquer forma, então não há custo
+    novo em referenciá-la aqui.
+    """
+    msg = (dados or {}).get("message") or {}
+    for campo, tipo in _CAMPO_EVOLUTION:
+        corpo = msg.get(campo)
+        if not isinstance(corpo, dict):
+            continue
+        nome = (corpo.get("fileName") or corpo.get("fileEncSha256")
+                or corpo.get("mimetype") or f"{campo}")
+        mime = corpo.get("mimetype") or ""
+        base64_ = (corpo.get("media") or corpo.get("base64") or "")
+        url = corpo.get("mediaUrl") or corpo.get("url") or corpo.get("link") or ""
+        if base64_:
+            return {"tipo": tipo, "mime": mime, "nome": nome,
+                    "fonte": {"base64": base64_}}
+        if url:
+            return {"tipo": tipo, "mime": mime, "nome": nome, "fonte": {"url": url}}
+    return None
+
+
+async def baixar_anexo(instancia: str, ref: str) -> tuple[str, bytes]:
+    """Baixa o arquivo pela Evolution, usando a URL que a instância guarda.
+
+    A Evolution não tem "download por id": o que ela guarda é a URL (que é
+    pública e não expira) e o `mediaUrl` que veio no webhook. Aqui o `ref` é a
+    própria URL — quem a entrega é o `extrair_anexo` acima, via `fonte["url"]`,
+    e esta função existe para quando o Evolution manda o id no lugar da URL.
+    """
+    if not instancia:
+        raise RuntimeError("canal de WhatsApp sem instance_name")
+    url = ref if ref.startswith("http") else ""
+    if not url:
+        raise RuntimeError("Evolution nao devolveu mediaUrl para o arquivo")
+    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as http:
+        resposta = await http.get(url)
+    resposta.raise_for_status()
+    mime = str(resposta.headers.get("content-type") or "application/octet-stream")
+    return mime.split(";")[0], resposta.content
