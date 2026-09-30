@@ -44,7 +44,19 @@ _API_PAGAMENTOS = "https://api.mercadopago.com/v1/payments"
 
 class MercadoPagoError(RuntimeError):
     """Falha ao falar com a API do Mercado Pago. A mensagem é segura para o
-    cliente ver (não vaza token nem corpo da resposta)."""
+    cliente ver (não vaza token nem corpo da resposta).
+
+    `status` e `url` carregam o que a resposta tinha a dizer: o webhook precisa
+    distinguir "este pagamento não existe (ou não é visível para a nossa chave)"
+    de "a API está fora do ar". São decisões opostas -- a primeira quer 200
+    (não há nada a confirmar e repetir não vai mudar nada), a segunda quer 503
+    (o MP volta em minutos, e é o dinheiro que ainda não abriu o período).
+    """
+
+    def __init__(self, mensagem: str, *, status: int | None = None, url: str = "") -> None:
+        super().__init__(mensagem)
+        self.status = status
+        self.url = url
 
 
 def _cabecalhos(idempotencia: str = "") -> dict:
@@ -69,7 +81,9 @@ def _tratar(aceno: httpx.Response) -> None:
         detalhe = ""
     log.warning("Mercado Pago respondeu HTTP %s: %s", aceno.status_code, detalhe[:200])
     raise MercadoPagoError(
-        (detalhe or "sem detalhe").strip()[:220] or "erro desconhecido do provedor"
+        (detalhe or "sem detalhe").strip()[:220] or "erro desconhecido do provedor",
+        status=aceno.status_code,
+        url=str(aceno.request.url) if aceno.request is not None else "",
     )
 
 

@@ -479,9 +479,19 @@ async def webhook_mercadopago(request: Request):
     try:
         estado = await mp.consultar_pagamento(int(mp_id))
     except mp.MercadoPagoError as e:
+        if e.status in (400, 404):
+            # O MP notificou um pagamento que a nossa chave não enxerga (ou que
+            # não existe mais): não há nada a confirmar e reenviar a notificação
+            # não muda nada, então isso é 200 e não 503. Dinheiro nenhum se
+            # perde: se o PIX cair mesmo, é o polling do checkout que confirma.
+            log.warning("Webhook MP %s: pagamento não existe no provedor (%s)", mp_id, e)
+            return {"recebido": True, "ignorado": "pagamento inexistente"}
         log.warning("Webhook MP: falha ao consultar %s: %s", mp_id, e)
         # 503 = "tenta de novo": o MP repete por horas. Fail-closed é o certo
-        # aqui; o que não pode é 200, que é "entregue, não insisto".
+        # aqui; o que não pode é 200, que é "entregue, não insisto". Token
+        # revogado (401/403) e limite de taxa (429) também caem neste ramo de
+        # propósito: repetir é o que resolve, e confiar no corpo seria aceitar
+        # pagamento que ninguém confirmou.
         raise HTTPException(503, "Consulta ao Mercado Pago indisponível.") from e
     if estado.get("status") != "approved":
         return {"recebido": True, "status": estado.get("status")}

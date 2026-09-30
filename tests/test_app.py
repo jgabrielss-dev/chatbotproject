@@ -2196,6 +2196,36 @@ if tem_testclient:
             check("data.id nao numerico e ignorado com 200 (nao 500)",
                   r.status_code == 200 and r.json().get("ignorado") == "id invalido",
                   f"HTTP {r.status_code} {r.text[:80]}")
+
+            # Pagamento que a nossa chave nao enxerga (404) nao e falha
+            # passageira: repetir a notificacao nao confirma nada, e o polling
+            # do checkout continua cobrindo o dinheiro.
+            async def _consultar_inexistente(mp_id):
+                raise mpm.MercadoPagoError("não encontrado", status=404, url=f"/v1/payments/{mp_id}")
+
+            mpm.consultar_pagamento = _consultar_inexistente
+            r = c.post("/api/webhooks/mercadopago",
+                       json={"type": "payment", "action": "payment.updated",
+                             "data": {"id": 999999999}})
+            check("pagamento inexistente no MP responde 200 (nao faz o MP reenviar)",
+                  r.status_code == 200 and not r.json().get("pago"),
+                  f"HTTP {r.status_code} {r.text[:80]}")
+            check("e nada foi marcado pago com pagamento inexistente", _marcados2 == [])
+
+            # Token revogado e limite de taxa: aqui repetir resolve, e confiar
+            # no corpo abriria um período que ninguém confirmou.
+            for _status, _rotulo in ((401, "token revogado"), (429, "limite de taxa"),
+                                     (500, "provedor fora do ar")):
+                async def _consultar_fora2(mp_id, _s=_status):
+                    raise mpm.MercadoPagoError("provedor recusou", status=_s)
+
+                mpm.consultar_pagamento = _consultar_fora2
+                r = c.post("/api/webhooks/mercadopago",
+                           json={"type": "payment", "action": "payment.updated",
+                                 "data": {"id": 8888}})
+                check(f"{_rotulo} no MP continua 503 (o MP precisa repetir)",
+                      r.status_code == 503, f"HTTP {r.status_code} {r.text[:80]}")
+            check("e nada foi marcado pago com o provedor recusando", _marcados2 == [])
     finally:
         mpm.consultar_pagamento = _consultar_orig2
         rotas_mod.rc.obter_pagamento_por_referencia = _por_ref_orig2
