@@ -719,15 +719,32 @@ async def registrar_consumo(usuario_id: str | None, agente_id: int, quantidade: 
     await _registrar(usuario_id, agente_id, quantidade)
 
 
-async def salvar_mensagem(sessao_id: int, de_ia: bool, texto: str) -> dict:
+async def salvar_mensagem(
+    sessao_id: int,
+    de_ia: bool,
+    texto: str,
+    chave: str | None = None,
+) -> dict | None:
+    """Grava uma linha em `mensagens`. Devolve None se a `chave` já existia.
+
+    `chave` amarra a linha ao item da fila que a produziu (ver a migration 0009).
+    O `ON CONFLICT DO NOTHING` mais o índice único parcial fazem o retry do worker
+    ser inofensivo: a segunda tentativa da mesma mensagem não vira uma segunda
+    linha no histórico nem um segundo consumo de cota.
+
+    O retorno `None` é o sinal de "essa linha já existia" — quem chama decide o
+    que fazer com ela. Quando `chave` é None (chat do navegador, sem fila) o
+    comportamento é o de sempre: sempre insere.
+    """
     pool = await get_pool()
     async with pool.acquire() as con:
         row = await con.fetchrow(
-            """INSERT INTO mensagens (sessao_id, de_ia, texto) VALUES ($1, $2, $3)
+            """INSERT INTO mensagens (sessao_id, de_ia, texto, chave) VALUES ($1, $2, $3, $4)
+               ON CONFLICT (chave) WHERE chave IS NOT NULL DO NOTHING
                RETURNING id, sessao_id, de_ia, texto, criado_em""",
-            sessao_id, de_ia, texto,
+            sessao_id, de_ia, texto, chave,
         )
-    return dict(row)
+    return dict(row) if row else None
 
 
 async def historico_sessao(sessao_id: int, limite: int = 20) -> list[dict]:

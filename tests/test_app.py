@@ -1102,6 +1102,207 @@ check("o worker confere a cota antes de tratar a mensagem",
       _worker.index("_cota_do_dono") < _worker.index("_tratar_mensagem"))
 check("a mensagem sem cota sai da fila (nao reprocessa para sempre)",
       'concluir_caixa(item["id"], "respondido", aviso)' in _worker)
+
+print("\n== correções: retry da fila não duplica mensagem nem cota ==")
+import app.pipeline as pipeline_mod  # noqa: E402
+import app.repositories as repos_mod  # noqa: E402
+
+# O worker pode rodar o MESMO item mais de uma vez: `_proxima_tentativa`
+# devolve a mensagem para o fim da fila depois de uma falha no Gemini ou no
+# envio. `_tratar_mensagem` recebe o id do item justamente para isso.
+check("o worker passa o id do item para o pipeline conseguir deduplicar",
+      'item["id"],' in _worker and "item_caixa" in
+      inspect.getsource(main_mod._tratar_mensagem),
+      "sem o id nao ha como amarrar a linha ao item que a produziu")
+
+_src_salvar = inspect.getsource(repos_mod.salvar_mensagem)
+check("o INSERT da mensagem tem ON CONFLICT (o retry nao vira segunda linha)",
+      "ON CONFLICT" in _src_salvar and "DO NOTHING" in _src_salvar,
+      "tres falhas = tres copias da mesma pergunta na tela do cliente")
+check("salvar_mensagem devolve None quando a linha ja existia",
+      "if row else None" in _src_salvar,
+      "sem sinal de volta o chamador nao sabe se inseriu ou re-encontrou")
+check("a cota e registrada na conversa que o pipeline chama",
+      "registrar_consumo" in inspect.getsource(repos_mod))
+
+# O comportamento de verdade, com um repo falso que guarda as linhas: a
+# migration 0009 esta no banco, o unico jeito de provar idempotencia e deixar
+# o ON CONFLICT real trabalhar.
+import app.pipeline as pipeline_mod  # noqa: E402
+import app.repositories as repos_mod  # noqa: E402
+
+_pool_falso = None
+
+
+class _Fake:
+    """Fila que o ON CONFLICT resolve como o indice unico do Postgres."""
+
+    def __init__(self):
+        self.linhas: dict[str, dict] = {}
+
+    async def fetchrow(self, sql, *args):
+        sessao_id, de_ia, texto, chave = args
+        # O SQL decide, e nao este falso: se `salvar_mensagem` perder o
+        # ON CONFLICT, o comportamento de verdade tem de mudar junto.
+        if "ON CONFLICT" not in sql.upper():
+            raise AssertionError(
+                "salvar_mensagem sem ON CONFLICT: o retry passaria a duplicar "
+                "a linha, entao este teste nao teria mais o que provar"
+            )
+        if chave is not None and chave in self.linhas:
+            return None  # ON CONFLICT ... DO NOTHING
+        novo = {"id": len(self.linhas) + 1, "sessao_id": sessao_id,
+                "de_ia": de_ia, "texto": texto}
+        if chave is not None:
+            self.linhas[chave] = novo
+        return novo
+
+
+class _Pool:
+    """Pool falso: `repositories` chama `pool.acquire()` como context manager."""
+
+    def __init__(self, fake):
+        self.f = fake
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    # O pool real é asyncpg e o `fetchrow` mora na conexão, não no pool.
+    async def fetchrow(self, sql, *args):
+        return await self.f.fetchrow(sql, *args)
+
+
+class _RepoFalso:
+    """Chama o `salvar_mensagem` DE VERDADE, com o SQL real, num pool falso.
+
+    Não reimplementa o INSERT: o que está em jogo aqui é justamente o
+    `ON CONFLICT`, e um INSERT reescrito no teste passaria a provar que o teste
+    funciona, não que o código funciona.
+    """
+
+    def __init__(self):
+        self.f = _Fake()
+        self.consumo = 0
+        self.historicos = 0
+        self.ia = 0
+
+    async def salvar_mensagem(self, sessao_id, de_ia, texto, chave=None):
+        row = await repos_mod.salvar_mensagem(sessao_id, de_ia, texto, chave)
+        if row is None:
+            return None
+        if de_ia:
+            self.ia += 1
+        else:
+            self.historicos += 1
+        return row
+
+    async def registrar_consumo(self, usuario_id, agente_id, quantidade=1):
+        self.consumo += quantidade
+
+    async def obter_ou_criar_sessao(self, agente_id, canal_id, externo):
+        return {"id": 7, "memoria": None}
+
+    async def historico_sessao(self, sessao_id):
+        return []
+
+    async def ultimos_trechos(self, sessao_id, n):
+        return []
+
+    async def atualizar_memoria(self, sessao_id, nova):
+        return None
+
+
+class _GeminiFalso:
+    """Falha N vezes e depois responde: e o retry real da fila."""
+
+    def __init__(self, falhas):
+        self.falhas = falhas
+        self.chamadas = 0
+
+    def ler_memoria(self, m):
+        return None
+
+    async def responder(self, *a, **k):
+        self.chamadas += 1
+        if self.chamadas <= self.falhas:
+            raise RuntimeError("gemini 503")
+        return "resposta"
+
+    async def atualizar_memoria(self, prompt, memoria, trechos):
+        return memoria
+
+
+_repo_idem = _RepoFalso()
+_ia_idem = _GeminiFalso(2)
+_agente_idem = {"id": 1, "dono_id": "u1", "ativo": True, "system_prompt": "p"}
+_canal_idem = {"id": 5, "tipo": "telegram"}
+_orig_repo = pipeline_mod.repo
+_orig_gemini = pipeline_mod.gemini
+_orig_pool = repos_mod.get_pool
+_orig_resolver = pipeline_mod._resolver_anexos
+try:
+    pipeline_mod.repo = _repo_idem
+    pipeline_mod.gemini = _ia_idem
+
+    async def _pool_idem():
+        return _Pool(_repo_idem.f)
+
+    repos_mod.get_pool = _pool_idem
+
+    async def _sem_anexos(canal, anexos):
+        return [], []
+
+    pipeline_mod._resolver_anexos = _sem_anexos
+
+    async def _rodar():
+        # Três tentativas do MESMO item da fila (o worker devolveu duas vezes).
+        for _ in range(3):
+            try:
+                await pipeline_mod.processar_mensagem(
+                    _agente_idem, _canal_idem, "tg:1", "oi", [], 42,
+                )
+            except RuntimeError:
+                pass
+
+    asyncio.run(_rodar())
+finally:
+    pipeline_mod.repo = _orig_repo
+    pipeline_mod.gemini = _orig_gemini
+    repos_mod.get_pool = _orig_pool
+    pipeline_mod._resolver_anexos = _orig_resolver
+
+check("tres tentativas do mesmo item gravam UMA mensagem do usuario",
+      _repo_idem.historicos == 1,
+      f"o historico tem {_repo_idem.historicos} copias da mesma pergunta")
+check("tres tentativas contam 1 na cota, nao 3",
+      _repo_idem.consumo == 1,
+      f"a pessoa foi cobrada {_repo_idem.consumo} vez pela mesma frase")
+check("a falha do Gemini NAO engoliu a resposta da tentativa boa",
+      _ia_idem.chamadas == 3 and _repo_idem.ia == 1,
+      f"{_ia_idem.chamadas} chamadas, {_repo_idem.ia} respostas gravadas")
+check("as tres tentativas usaram a MESMA chave de item",
+      _repo_idem.f.linhas.get("caixa:42") is not None,
+      f"chaves gravadas: {sorted(_repo_idem.f.linhas)}")
+check("a resposta da IA tem chave propria, separada da pergunta",
+      _repo_idem.f.linhas.get("caixa:42:ia") is not None,
+      "se dividissem a chave, a segunda tentativa apagaria a resposta")
+check("sem chave (chat do navegador) nada muda: sempre insere",
+      "chave: str | None = None" in _src_salvar,
+      "o chat normal nao vem da fila e precisa poder repetir a mensagem")
+check("a migration 0009 amarra a linha ao item da fila",
+      "mensagens_chave_uniq" in
+      Path(ROOT / "supabase" / "migrations" / "0009_mensagem_idempotente.sql")
+      .read_text(encoding="utf-8")
+      and "chave IS NOT NULL" in
+      Path(ROOT / "supabase" / "migrations" / "0009_mensagem_idempotente.sql")
+      .read_text(encoding="utf-8"),
+      "indice unico parcial: fila deduplica, chat do navegador nao colide")
 _check = inspect.getsource(lim.checar_mensagem)
 check("a cota travada devolve texto para o cliente final, nao silencio",
       "limite" in _check.lower())
@@ -1650,7 +1851,7 @@ if tem_testclient:
         async def obter_ou_criar_sessao(self, agente_id, canal_id, externo):
             return {"id": 7, "memoria": None}
 
-        async def salvar_mensagem(self, sessao_id, de_ia, texto):
+        async def salvar_mensagem(self, sessao_id, de_ia, texto, chave=None):
             pass
 
         async def historico_sessao(self, sessao_id):

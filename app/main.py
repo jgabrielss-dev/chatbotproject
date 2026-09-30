@@ -274,6 +274,7 @@ async def _tratar_mensagem(
     usuario_externo: str,
     texto: str,
     anexos: list[midia.Midia] | None = None,
+    item_caixa: int | None = None,
 ):
     # `None` como dono: este caminho é o worker interno, que processa a fila de
     # todos os tenants. Ele não é uma requisição de usuário, e o canal já veio
@@ -281,7 +282,9 @@ async def _tratar_mensagem(
     agente = await repo.obter_agente(canal["agente_id"], None)
     if not agente or not agente["ativo"]:
         return
-    resposta = await processar_mensagem(agente, canal, usuario_externo, texto, anexos)
+    resposta = await processar_mensagem(
+        agente, canal, usuario_externo, texto, anexos, item_caixa,
+    )
     return resposta
 
 
@@ -514,6 +517,11 @@ async def _processar_caixa(limite: int | None = None) -> None:
             resposta = await _tratar_mensagem(
                 canal, _prefixo_usuario(canal, item["remetente"]), item["texto"],
                 _anexos_do_item(item),
+                # O id do item vai junto porque este bloco PODE rodar de novo:
+                # uma falha no Gemini ou no envio devolve o item para a fila, e
+                # sem a chave a tentativa seguinte duplicaria a linha no
+                # histórico e a cota (migration 0009).
+                item["id"],
             )
         except Exception as e:
             log.exception("Falha ao gerar resposta (inbox %s): %s", item["id"], e)

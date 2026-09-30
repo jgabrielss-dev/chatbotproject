@@ -63,10 +63,21 @@ CREATE TABLE IF NOT EXISTS mensagens (
   sessao_id INTEGER NOT NULL REFERENCES sessoes(id) ON DELETE CASCADE,
   de_ia BOOLEAN NOT NULL,
   texto TEXT NOT NULL,
-  criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+  criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Item da fila que gerou a linha ('caixa:<id>', 'caixa:<id>:ia'). O worker
+  -- devolve a mensagem para a fila depois de uma falha no Gemini ou no envio;
+  -- sem esta chave, cada tentativa gravava a pergunta de novo no histórico e
+  -- contava 1 na cota do dono de novo (migration 0009).
+  chave TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_mensagens_sessao ON mensagens (sessao_id, criado_em);
+
+-- Unico e PARCIAL de proposito: a fila deduplica pelo item, mas o chat do
+-- navegador nao vem da fila e tem `chave` nula — vários NULL convivem sem
+-- colidir, então repetir a mesma frase no chat continua gravando.
+CREATE UNIQUE INDEX IF NOT EXISTS mensagens_chave_uniq
+  ON mensagens (chave) WHERE chave IS NOT NULL;
 
 -- Caixa de entrada durável: nenhuma mensagem recebida é ignorada.
 -- O webhook apenas persiste a mensagem e um worker processa com retry (backoff).

@@ -242,6 +242,7 @@ async def processar_mensagem(
     usuario_externo: str,
     texto: str,
     anexos: list[midia.Midia] | None = None,
+    item_caixa: int | None = None,
 ) -> str:
     """Fluxo completo: sessão -> salvar user -> Gemini(hist+memoria) -> salvar IA -> memória.
 
@@ -249,6 +250,15 @@ async def processar_mensagem(
     `mensagens.texto` é a descrição do que chegou, não os bytes: o histórico fica
     legível (e barato) mesmo depois de um áudio de 3 minutos, e a pessoa vê na
     tela o que mandou.
+
+    `item_caixa` é o id de `caixa_entrada` quando a mensagem vem da fila, e é o
+    que torna o retry inofensivo (migration 0009). Sem ele, cada tentativa do
+    worker gravava a pergunta de novo no histórico e contava 1 na cota do dono
+    de novo: uma mensagem que falhasse três vezes virava três linhas na tela e
+    três na conta. Com ele, a segunda tentativa não acha a linha porque a chave
+    `caixa:<id>` já existe — e, como o `salvar_mensagem` devolve None, a cota
+    também não é contada duas vezes. A IA ainda roda (é o que a tentativa está
+    tentando fazer); o que não se repete é o_effecto colateral.
     """
     sessao = await repo.obter_ou_criar_sessao(agente["id"], canal["id"], usuario_externo)
 
@@ -259,12 +269,18 @@ async def processar_mensagem(
         # Telegram chega aqui sem texto nenhum. Registrar algo é melhor do que
         # deixar a mensagem existir só na fila.
         registro = "(mensagem sem texto e sem anexo reconhecivel)"
-    await repo.salvar_mensagem(sessao["id"], False, registro)
+    chave = f"caixa:{item_caixa}" if item_caixa is not None else None
+    gravada = await repo.salvar_mensagem(sessao["id"], False, registro, chave)
 
     # A cota é do DONO do agente, não da sessão: o item 9 fala em limite mensal
     # por agente, e o dono é quem tem assinatura. `dono_id` nulo é agente legado
     # sem dono (só o admin responde por ele), e aí não há o que cobrar.
-    await repo.registrar_consumo(agente.get("dono_id"), agente["id"])
+    #
+    # Só quando a linha foi realmente INSERT. `gravada is None` é o retry: a
+    # mensagem já estava registrada pela tentativa anterior e já contou 1 na
+    # cota; contar de novo cobraria duas vezes pela mesma frase.
+    if gravada is not None:
+        await repo.registrar_consumo(agente.get("dono_id"), agente["id"])
 
     historico = await repo.historico_sessao(sessao["id"])
     memoria = gemini.ler_memoria(sessao.get("memoria"))
@@ -274,7 +290,9 @@ async def processar_mensagem(
         agente["system_prompt"], historico, _texto_com_aviso(registro, falhas),
         memoria, baixados,
     )
-    await repo.salvar_mensagem(sessao["id"], True, resposta)
+    await repo.salvar_mensagem(
+        sessao["id"], True, resposta, f"{chave}:ia" if chave else None,
+    )
 
     trechos = await repo.ultimos_trechos(sessao["id"], 6)
     nova_memoria = await gemini.atualizar_memoria(agente["system_prompt"], memoria, trechos)
